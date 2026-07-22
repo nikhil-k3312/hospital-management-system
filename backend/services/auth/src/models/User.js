@@ -9,12 +9,6 @@ const userSchema = new mongoose.Schema({
     lowercase: true,
     trim: true,
   },
-
-  fullName: {
-    type: String,
-    trim: true,
-    default: '',
-  },
   
   passwordHash: {
     type: String,
@@ -58,18 +52,6 @@ const userSchema = new mongoose.Schema({
     type: Date,
     default: null,
   },
-
-  refreshTokens: {
-    type: [String],
-    default: [],
-    validate: {
-      // Limits server-side refresh token tracking per user.
-      validator(tokens) {
-        return tokens.length <= 5;
-      },
-      message: 'A user can have at most 5 refresh tokens',
-    },
-  },
 }, {
   timestamps: true,
 });
@@ -105,7 +87,6 @@ userSchema.methods.toJSON = function() {
   delete obj.passwordHash;
   delete obj.failedLoginAttempts;
   delete obj.accountLockedUntil;
-  delete obj.refreshTokens;
   return obj;
 };
 

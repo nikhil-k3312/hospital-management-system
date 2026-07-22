@@ -1,6 +1,6 @@
 require('dotenv').config();
 
-const config = {
+module.exports = {
   port: process.env.PORT || 8001,
   nodeEnv: process.env.NODE_ENV || 'development',
   
@@ -10,8 +10,7 @@ const config = {
   
   jwt: {
     secret: process.env.JWT_SECRET,
-    refreshSecret: process.env.JWT_REFRESH_SECRET,
-    expiry: process.env.JWT_EXPIRY || '15m',
+    expiry: process.env.JWT_EXPIRY || '24h',
   },
   
   email: {
@@ -25,28 +24,8 @@ const config = {
     expiryMinutes: parseInt(process.env.OTP_EXPIRY_MINUTES) || 10,
     length: parseInt(process.env.OTP_LENGTH) || 6,
   },
-
-  redis: {
-    host: process.env.REDIS_HOST || 'localhost',
-    port: parseInt(process.env.REDIS_PORT) || 6379,
-  },
   
   cors: {
     origins: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3000'],
   },
-
-  security: {
-    minTrustScore: parseInt(process.env.MIN_TRUST_SCORE, 10) || 50,
-    highSensitivityTrustScore: parseInt(process.env.HIGH_SENSITIVITY_TRUST_SCORE, 10) || 70,
-  },
 };
-
-module.exports = config;
-
-const requiredEnvVars = ['MONGODB_URI', 'JWT_SECRET', 'JWT_REFRESH_SECRET', 'EMAIL_PASSWORD'];
-
-requiredEnvVars.forEach((key) => {
-  if (!process.env[key] || process.env[key].trim() === '') {
-    throw new Error(`Missing env: ${key}`);
-  }
-});

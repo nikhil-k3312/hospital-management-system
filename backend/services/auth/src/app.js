@@ -3,7 +3,6 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const cookieParser = require('cookie-parser');
 const config = require('./config/config');
 const logger = require('../../../shared/utils/logger');
 const authRoutes = require('./routes/authRoutes');
@@ -17,7 +16,6 @@ const app = express();
 
 // Security headers
 app.use(helmet());
-app.use(cookieParser());
 
 // CORS - Allow frontend to access backend
 app.use(cors({
@@ -28,8 +26,8 @@ app.use(cors({
 }));
 
 // Parse JSON bodies
-app.use(express.json({ limit: '1kb' }));
-app.use(express.urlencoded({ extended: true, limit: '1kb' }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Rate limiting - Prevent spam/abuse
 const limiter = rateLimit({
@@ -44,30 +42,6 @@ const limiter = rateLimit({
 });
 
 app.use('/api/', limiter);
-
-// Rate limiting - Restrict OTP request and verification attempts per IP
-const otpLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  message: {
-    success: false,
-    message: 'Too many OTP requests. Try again in 15 minutes.'
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-// Applies a limiter only to POST requests for a route.
-const postOnlyLimiter = (req, res, next) => {
-  if (req.method !== 'POST') {
-    return next();
-  }
-
-  return otpLimiter(req, res, next);
-};
-
-app.use('/api/auth/login', postOnlyLimiter);
-app.use('/api/auth/verify-otp', postOnlyLimiter);
 
 // Request logging middleware
 app.use((req, res, next) => {
@@ -150,18 +124,15 @@ const startServer = async () => {
       logger.info('='.repeat(50));
     });
     
-    // Gracefully closes the HTTP server and MongoDB connection.
-    const gracefulShutdown = (signal) => {
-      logger.info(`${signal} received. Shutting down gracefully...`);
+    // Graceful shutdown
+    process.on('SIGTERM', () => {
+      logger.info('⚠️ SIGTERM received. Shutting down gracefully...');
       server.close(() => {
-        logger.info('Server closed');
+        logger.info('✅ Server closed');
         mongoose.connection.close();
         process.exit(0);
       });
-    };
-
-    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+    });
     
   } catch (error) {
     logger.error('❌ Failed to start server:', error);

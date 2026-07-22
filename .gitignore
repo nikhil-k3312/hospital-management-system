@@ -1,8 +1,0 @@
-.env
-*.env
-!.env.example
-node_modules/
-logs/
-backend/logs/
-backend/services/auth/logs/
-backend/services/auth/node_modules/
