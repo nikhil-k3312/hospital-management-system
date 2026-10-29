@@ -1,0 +1,385 @@
+%% =====================================================================
+\chapter{The Tamper-Evident Ledger}\label{ch:ledger}
+
+The ledger is what makes MediChain's records trustworthy. This chapter explains
+the idea from first principles, then the code that implements it, then how
+tampering is detected and demonstrated.
+
+\section{The idea in one picture}
+
+A \emph{hash} (SHA-256) turns any data into a 64-character fingerprint. Change
+one character of the data and the fingerprint changes completely; it is
+infeasible to find different data with the same fingerprint.
+
+A \emph{hash chain} is a list of entries where each entry stores the fingerprint
+of the previous entry, and its own fingerprint covers everything including that
+link:
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=0.9cm,
+  blk/.style={draw=brand,fill=brandlight,rounded corners=2pt,align=left,font=\scriptsize,minimum width=3.5cm,inner sep=4pt}]
+  \node[blk] (e0) {\textbf{seq 0} (genesis)\\ action: REGISTER\\ payloadHash: 9f2c\ldots\\ previous: \textit{null}\\ \textbf{entryHash: a41e\ldots}};
+  \node[blk,right=of e0] (e1) {\textbf{seq 1}\\ action: CREATE record\\ payloadHash: 77b0\ldots\\ previous: a41e\ldots\\ \textbf{entryHash: 0c9d\ldots}};
+  \node[blk,right=of e1] (e2) {\textbf{seq 2}\\ action: UPDATE record\\ payloadHash: e512\ldots\\ previous: 0c9d\ldots\\ \textbf{entryHash: 5be3\ldots}};
+  \draw[arr] (e0) -- (e1);
+  \draw[arr] (e1) -- (e2);
+\end{tikzpicture}
+\caption{Three entries of the records chain}\label{fig:chain}
+\end{figure}
+
+Two kinds of tampering become detectable:
+
+\begin{enumerate}
+  \item \textbf{Editing a ledger entry.} If someone changes entry 1's action, its
+    recomputed hash no longer equals its stored \code{entryHash}. If they also
+    recompute and store the new hash, entry 2's \code{previousEntryHash} no
+    longer matches. They would have to rewrite every later entry.
+  \item \textbf{Editing the data itself.} Each entry stores the hash of the
+    protected document's content (\code{payloadHash}) at that moment. If someone
+    edits the medical record directly in MongoDB, the record's current hash no
+    longer equals the hash the ledger last recorded for it, and they cannot fix
+    the ledger without breaking the chain (point 1).
+\end{enumerate}
+
+\section{Two chains}
+
+\begin{itemize}
+  \item \textbf{records}: every create or change of clinical and financial data
+    (users registered and verified, records, file attachments, consents,
+    appointments, prescriptions, bills, claims, break-glass accesses).
+  \item \textbf{access}: every allow or deny decision of the zero-trust layer.
+\end{itemize}
+
+They are independent sequences in the same collection, so the high-volume
+access log does not slow down reads of a record's history.
+
+\section{The entry: \file{src\codesl{}models\codesl{}LedgerEntry\codedot{}js}}
+
+\begin{lstlisting}[language=JavaScript,caption={LedgerEntry schema (\file{src/models/LedgerEntry.js})}]
+const ledgerEntrySchema = new mongoose.Schema({
+  chain: { type: String, enum: ['records', 'access'], required: true },
+  seq: { type: Number, required: true }, // position in the chain, starting at 0
+  entityType: { type: String, required: true },
+  entityId: { type: String, default: null },
+  action: { type: String, required: true },
+  actorId: { type: String, default: null },
+  actorRole: { type: String, default: null },
+  payloadHash: { type: String, default: null }, // SHA-256 of the entity's content at this moment
+  meta: { type: mongoose.Schema.Types.Mixed, default: {} },
+  timestamp: { type: Date, required: true },
+  previousEntryHash: { type: String, default: null }, // null only for the genesis entry
+  entryHash: { type: String, required: true },
+}, { versionKey: false });
+
+// The unique (chain, seq) index makes forking impossible: two writers that read
+// the same "last entry" both try to insert seq N, and the second one fails.
+ledgerEntrySchema.index({ chain: 1, seq: 1 }, { unique: true });
+\end{lstlisting}
+
+The application has no route that updates or deletes ledger entries. The only
+code that writes them is \code{ledgerService.append}.
+
+\section{Writing an entry: \file{src\codesl{}services\codesl{}ledgerService\codedot{}js}}
+
+\begin{lstlisting}[language=JavaScript,caption={computeEntryHash and appendOnce (\file{src/services/ledgerService.js})}]
+function computeEntryHash(entry) {
+  return sha256(canonicalJSON({
+    chain: entry.chain,
+    seq: entry.seq,
+    entityType: entry.entityType,
+    entityId: entry.entityId ?? null,
+    action: entry.action,
+    actorId: entry.actorId ?? null,
+    actorRole: entry.actorRole ?? null,
+    payloadHash: entry.payloadHash ?? null,
+    meta: entry.meta || {},
+    timestamp: new Date(entry.timestamp).toISOString(),
+    previousEntryHash: entry.previousEntryHash ?? null,
+  }));
+}
+
+async function appendOnce({ chain, entityType, entityId, action, actorId, actorRole, payload, payloadHash, meta }) {
+  const last = await LedgerEntry.findOne({ chain }).sort({ seq: -1 }).select('seq entryHash').lean();
+  const entry = {
+    chain,
+    seq: last ? last.seq + 1 : 0,
+    entityType,
+    entityId: entityId ? String(entityId) : null,
+    action,
+    actorId: actorId ? String(actorId) : null,
+    actorRole: actorRole || null,
+    payloadHash: payloadHash || (payload !== undefined ? hashObject(payload) : null),
+    // JSON round-trip drops undefined values, which MongoDB would otherwise
+    // store as null and so change the hash on read-back.
+    meta: meta ? JSON.parse(JSON.stringify(meta)) : {},
+    timestamp: new Date(),
+    previousEntryHash: last ? last.entryHash : null,
+  };
+  entry.entryHash = computeEntryHash(entry);
+  return LedgerEntry.create(entry);
+}
+\end{lstlisting}
+
+\begin{howto}
+\begin{enumerate}
+  \item Read the current head of the chain (highest \code{seq}).
+  \item Build the new entry with \code{seq = head.seq + 1} and
+    \code{previousEntryHash = head.entryHash}.
+  \item Hash the entity's content (\code{payload}) with canonical JSON
+    (Section~\ref{ch:foundation}), unless a hash was supplied (files supply the
+    SHA-256 of their bytes).
+  \item Hash every field of the entry, store it as \code{entryHash}, insert.
+\end{enumerate}
+The \code{meta} round-trip is a subtle fix: an \code{undefined} value would be
+hashed as ``absent'' but stored by MongoDB as \code{null}, so the recomputed hash
+on read-back would differ and the chain would appear broken.
+\end{howto}
+
+\subsection{Concurrency: two requests at once}
+
+If two requests read the same head and both insert \code{seq = N}, the chain
+would fork. Two mechanisms prevent this:
+
+\begin{lstlisting}[language=JavaScript,caption={Serialised appends with retry (\file{src/services/ledgerService.js})}]
+const queues = new Map();
+
+function enqueue(chain, task) {
+  const previous = queues.get(chain) || Promise.resolve();
+  const next = previous.then(task, task);
+  queues.set(chain, next.catch(() => {}));
+  return next;
+}
+
+function append(params) {
+  return enqueue(params.chain, async () => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        return await appendOnce(params);
+      } catch (error) {
+        if (error.code !== 11000) throw error; // not a sequence collision
+      }
+    }
+    throw new Error('LEDGER_APPEND_CONFLICT');
+  });
+}
+\end{lstlisting}
+
+\begin{itemize}
+  \item \textbf{Within one process}, appends to a chain form a promise queue:
+    each waits for the previous one, so they read the head one after another.
+  \item \textbf{Across processes} (several API instances), the unique
+    \code{(chain, seq)} index makes the second insert fail with duplicate-key
+    error 11000; the writer re-reads the head and retries.
+\end{itemize}
+
+\subsection{The shortcut used by every module}
+
+\begin{lstlisting}[language=JavaScript,caption={recordEvent (\file{src/services/ledgerService.js})}]
+function recordEvent({ entityType, entity, action, actor, meta, payloadHash }) {
+  return append({
+    chain: 'records',
+    entityType,
+    entityId: entity._id,
+    action,
+    actorId: actor ? actor.userId || actor._id : null,
+    actorRole: actor ? actor.role : 'system',
+    payload: typeof entity.ledgerPayload === 'function' ? entity.ledgerPayload() : undefined,
+    payloadHash,
+    meta,
+  });
+}
+\end{lstlisting}
+
+Each protected model defines \code{ledgerPayload()}: the fields whose integrity
+matters. For a medical record:
+
+\begin{lstlisting}[language=JavaScript,caption={What the ledger protects for a record (\file{src/models/MedicalRecord.js})}]
+medicalRecordSchema.methods.ledgerPayload = function ledgerPayload() {
+  return {
+    patientId: this.patientId.toString(),
+    doctorId: this.doctorId ? this.doctorId.toString() : null,
+    recordType: this.recordType,
+    title: this.title,
+    description: this.description,
+    diagnosis: this.diagnosis,
+    findings: this.findings,
+    attachments: this.attachments.map((a) => ({ fileId: a.fileId, sha256: a.sha256 })),
+    version: this.version,
+  };
+};
+\end{lstlisting}
+
+Bookkeeping fields such as \code{updatedAt} or \code{ledgerEntryId} are left out
+on purpose: they change for harmless reasons and would cause false alarms. The
+same pattern exists on \code{Appointment}, \code{AccessGrant},
+\code{Prescription}, \code{Bill} and \code{Claim}.
+
+\section{Verifying}
+
+\subsection{Walking a chain}
+
+\begin{lstlisting}[language=JavaScript,caption={verifyChain (\file{src/services/ledgerService.js})}]
+async function verifyChain(chain) {
+  const cursor = LedgerEntry.find({ chain }).sort({ seq: 1 }).lean().cursor();
+  let previous = null;
+  let checked = 0;
+
+  for await (const entry of cursor) {
+    const expectedSeq = previous ? previous.seq + 1 : 0;
+    if (entry.seq !== expectedSeq) {
+      return { chain, valid: false, entriesChecked: checked, brokenAtSeq: expectedSeq, problem: 'missing_entry' };
+    }
+    if (entry.previousEntryHash !== (previous ? previous.entryHash : null)) {
+      return { chain, valid: false, entriesChecked: checked, brokenAtSeq: entry.seq, problem: 'broken_link' };
+    }
+    if (computeEntryHash(entry) !== entry.entryHash) {
+      return { chain, valid: false, entriesChecked: checked, brokenAtSeq: entry.seq, problem: 'entry_modified' };
+    }
+    previous = entry;
+    checked += 1;
+  }
+
+  return { chain, valid: true, entriesChecked: checked, headHash: previous ? previous.entryHash : null };
+}
+\end{lstlisting}
+
+A database cursor streams entries one by one, so even a large chain is verified
+in constant memory. The three checks detect a deleted entry (a gap in
+\code{seq}), a re-ordered or re-linked entry, and an edited entry.
+
+\subsection{Checking a document against the ledger}
+
+\begin{lstlisting}[language=JavaScript,caption={verifyEntity (\file{src/services/ledgerService.js})}]
+async function verifyEntity(entityType, entity) {
+  const latest = await LedgerEntry.findOne({
+    chain: 'records', entityType, entityId: String(entity._id), payloadHash: { $ne: null },
+    action: { $nin: ['FILE_ATTACHED', 'VIEW', 'BREAK_GLASS_ACCESS'] },
+  }).sort({ seq: -1 }).lean();
+
+  if (!latest) {
+    return { entityId: String(entity._id), matches: false, reason: 'no_ledger_entry' };
+  }
+  const currentHash = hashObject(entity.ledgerPayload());
+  return {
+    entityId: String(entity._id),
+    matches: currentHash === latest.payloadHash,
+    currentHash,
+    ledgerHash: latest.payloadHash,
+    ledgerSeq: latest.seq,
+  };
+}
+\end{lstlisting}
+
+The most recent content-bearing entry for the document holds the hash of what
+the document \emph{should} contain. Recompute the document's hash now; if they
+differ, it was changed without going through the API. A document with no ledger
+entry at all (inserted directly into the database) is also reported.
+
+\subsection{The full audit: \code{GET \codesl{}api\codesl{}ledger\codesl{}verify}}
+
+\begin{lstlisting}[language=JavaScript,caption={Full integrity audit (\file{src/modules/ledger/ledger.routes.js})}]
+const PROTECTED = [
+  { entityType: 'record', model: MedicalRecord, label: 'Medical records', describe: (d) => d.title },
+  { entityType: 'prescription', model: Prescription, label: 'Prescriptions', describe: (d) => `${d.medication} ${d.dosage}` },
+  { entityType: 'consent', model: AccessGrant, label: 'Consents', describe: (d) => `consent ${d.status}` },
+  { entityType: 'appointment', model: Appointment, label: 'Appointments', describe: (d) => d.startTime.toISOString() },
+  { entityType: 'claim', model: Claim, label: 'Insurance claims', describe: (d) => d.claimNumber },
+  { entityType: 'bill', model: Bill, label: 'Bills', describe: (d) => d.billNumber },
+];
+
+router.get('/verify', asyncHandler(async (req, res) => {
+  const started = Date.now();
+  const chains = await Promise.all(['records', 'access'].map((c) => ledgerService.verifyChain(c)));
+
+  const entities = [];
+  for (const { entityType, model, label, describe } of PROTECTED) {
+    const docs = await model.find();
+    const results = await Promise.all(docs.map((doc) => ledgerService.verifyEntity(entityType, doc)));
+    const tampered = results.map((r, i) => ({ ...r, name: describe(docs[i]) })).filter((r) => !r.matches);
+    entities.push({
+      entityType,
+      label,
+      checked: results.length,
+      tampered: tampered.map((t) => ({ entityId: t.entityId, name: t.name, reason: t.reason || 'content_changed', ledgerSeq: t.ledgerSeq })),
+    });
+  }
+
+  const valid = chains.every((c) => c.valid) && entities.every((e) => e.tampered.length === 0);
+  res.json({ success: true, data: { valid, chains, entities, checkedAt: new Date(), durationMs: Date.now() - started } });
+}));
+\end{lstlisting}
+
+This is what the admin's \textbf{Verify ledger} button calls, and what
+\code{npm run ledger:verify} runs from the command line. For one record,
+\code{GET \codesl{}api\codesl{}records\codesl{}:id\codesl{}verify} additionally re-reads every attached file from
+GridFS and compares the SHA-256 of its bytes with the hash in the ledger
+(Chapter~\ref{ch:records}).
+
+\section{Demonstrating tamper detection}
+
+\file{scripts\codesl{}tamper-demo\codedot{}js} plays a malicious insider with
+direct database access:
+
+\begin{lstlisting}[language=JavaScript,caption={The insider edit (\file{scripts/tamper-demo.js})}]
+  const record = await MedicalRecord.findOne({ title: 'Stage 1 essential hypertension' });
+  if (!record) throw new Error('Seeded record not found. Run "npm run seed -- --reset" first.');
+  fs.writeFileSync(STATE, JSON.stringify({ recordId: record._id.toString(), original: record.diagnosis }));
+  // updateOne on the raw collection: no API, no validation, no ledger entry. What an insider with DB access could do.
+  await MedicalRecord.collection.updateOne({ _id: record._id }, { $set: { diagnosis: 'No hypertension. Patient healthy.' } });
+\end{lstlisting}
+
+\begin{lstlisting}[style=shell,caption={Running the demonstration}]
+npm run demo:tamper            # change the diagnosis directly in MongoDB
+npm run ledger:verify          # -> record ... TAMPERED: <id>  ...  TAMPERING DETECTED (exit 1)
+npm run demo:tamper -- --restore
+npm run ledger:verify          # -> LEDGER VALID
+npm run demo:tamper -- --ledger    # rewrite a ledger entry -> chain "records": BROKEN (entry_modified)
+\end{lstlisting}
+
+The same result appears in the admin dashboard (Ledger $\to$ Verify ledger) and
+on the patient's record (Verify integrity). The integration test in
+\file{tests\codesl{}integration\codesl{}records\codedot{}test\codedot{}js} automates
+exactly this scenario:
+
+\begin{lstlisting}[language=JavaScript,caption={Tamper detection test (\file{tests/integration/records.test.js})}]
+  test('editing a record directly in MongoDB (bypassing the API) is detected', async () => {
+    const w = await world();
+    await grantAccess(w);
+    const created = await newRecord(w.doctor, w.patientUser._id);
+    const id = created.body.data._id;
+
+    await MedicalRecord.updateOne({ _id: id }, { $set: { diagnosis: 'Healthy, no hypertension' } });
+
+    const verify = await as(w.doctor).get(`/api/records/${id}/verify`);
+    expect(verify.body.data.intact).toBe(false);
+    expect(verify.body.data.content.matches).toBe(false);
+
+    const audit = await as(w.admin).get('/api/ledger/verify');
+    expect(audit.body.data.valid).toBe(false);
+    expect(audit.body.data.chains.every((c) => c.valid)).toBe(true); // the chain itself is intact
+    const recordCheck = audit.body.data.entities.find((e) => e.entityType === 'record');
+    expect(recordCheck.tampered.map((t) => t.entityId)).toEqual([id]);
+  });
+\end{lstlisting}
+
+\section{Limits and how to close them}\label{sec:ledger-limits}
+
+A hash chain proves that history is \emph{internally consistent}. An attacker
+with full write access to MongoDB \emph{and} the patience to recompute every
+hash after the edited point could produce a new, consistent chain. Two
+inexpensive measures defeat that:
+
+\begin{itemize}
+  \item \textbf{Anchoring.} Periodically publish the head hash of each chain
+    (\code{GET \codesl{}api\codesl{}ledger\codesl{}stats} returns it) somewhere the attacker cannot
+    change: a signed email to auditors, a public timestamping service, or a
+    public blockchain transaction. A rewritten chain will not reproduce a
+    published head hash.
+  \item \textbf{Separation of duties.} Run the API with a MongoDB user that may
+    insert into \code{ledgerentries} but not update or delete.
+\end{itemize}
+
+Neither is implemented yet; both are listed in Chapter~\ref{ch:demo}. Moving to
+Hyperledger Fabric later would replace \code{ledgerService} only: every caller
+already goes through \code{append} and \code{recordEvent}.

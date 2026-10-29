@@ -1,0 +1,124 @@
+%% =====================================================================
+\chapter{Demo, Security Summary and Future Work}\label{ch:demo}
+
+\section{Demo script}
+
+The full step-by-step script is in \file{docs\codesl{}DEMO\codedot{}md}. In outline (about 25
+minutes, after \code{npm run seed -- --reset} and \code{npm run dev}):
+
+\begin{enumerate}
+  \item \textbf{Landing page and login (2 min).} Live homepage counts. Sign in as
+    \code{you+patient@gmail.com}: password, then the emailed 6-digit code.
+    Reload the page: still signed in, through the HttpOnly refresh cookie.
+  \item \textbf{Patient, Arjun Mehta (5 min).} Book an appointment from the live
+    slot grid. Open the hypertension record, download an attachment,
+    \emph{Verify integrity}, read the ledger history. Approve Dr Menon's access
+    request. Request a refill. Show vitals charts. File a claim on an unpaid bill.
+  \item \textbf{Doctor, Dr Ananya Iyer (5 min).} Confirm the new booking (Arjun is
+    notified). Complete a visit: a bill appears. Open Arjun's chart, write a
+    record, upload a lab report, prescribe. Find Rohan Gupta by email: his chart
+    is refused (403, no consent). Switch on \emph{Emergency access} with a
+    reason: the chart opens under a red banner, and Rohan and the admins are
+    notified.
+  \item \textbf{Admin (4 min).} Live statistics. Approve Dr Kavya Reddy. Deactivate
+    and reactivate a user. Register an IoT device (key shown once). Read the
+    Access Control audit, including the break-glass entry. Ledger:
+    \emph{Verify ledger} reports a valid ledger.
+  \item \textbf{Tamper detection (2 min).} \code{npm run demo:tamper} edits Arjun's
+    diagnosis directly in MongoDB. \emph{Verify ledger} now reports
+    tampering and names the record; Arjun's \emph{Verify integrity} turns red.
+    \code{npm run demo:tamper -- --restore}, verify again: valid.
+  \item \textbf{Live IoT (2 min).} \code{npm run demo:iot -- --interval 2} streams
+    readings to the doctor's IoT Monitoring page; \code{--spike} sends abnormal
+    values that raise alerts for the patient and doctor.
+  \item \textbf{Insurance agent, Priya Sharma (3 min).} Process the submitted
+    claim: under review, approve with an amount, settle. Each step is a ledger
+    entry and a notification to Arjun; his bill shows the covered amount.
+  \item \textbf{Failure states (1 min).} Stop the server: every screen shows
+    ``Server unreachable'' with \emph{Try again}. A new account shows real empty
+    states.
+\end{enumerate}
+
+\section{Security summary}
+
+\begin{longtable}{@{}P{4.4cm}P{9.6cm}@{}}
+\caption{Threats and controls}\label{tab:threats}\\
+\toprule
+\textbf{Threat} & \textbf{Control} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Threat} & \textbf{Control} \\
+\midrule
+\endhead
+Stolen password & Second factor (emailed OTP); lockout after 5 failures; rate limits \\
+OTP guessing & 6 random digits, 10-minute TTL, single use, per-email attempt limit, constant-time compare \\
+Account enumeration & Same message for unknown email and wrong password \\
+Stolen access token & 15-minute life; revocable by \code{jti}; trust score drops with age \\
+Stolen refresh token & HttpOnly + SameSite=Strict cookie; rotation makes reuse detectable; revocable \\
+XSS & Strict CSP without inline scripts; every value escaped; tokens not in storage \\
+CSRF & SameSite=Strict cookie limited to \code{\codesl{}api\codesl{}auth}; API uses Bearer headers \\
+Privilege escalation & Role, approval and trust checked server-side on every route; unknown body fields rejected; admin not self-registrable \\
+Doctor snooping & Patient consent with expiry required; break-glass audited and notified \\
+Deactivated user keeps working & Session state re-checked per request (5-minute cache, invalidated on change) \\
+Insider edits the database & Hash chain plus per-document payload hashes; \code{ledger:verify} and UI verification \\
+Tampered file & SHA-256 at upload in the ledger; re-hashed on verify; hash header on download \\
+Malicious upload & Type whitelist, 10\,MB limit, served with \code{nosniff} and a fixed content type \\
+Redis outage & Fail closed (503), never fail open \\
+Leaked secrets & Only in environment; config validation; \file{\codedot{}env} git-ignored and excluded from Docker images \\
+Stolen device key & Only a hash stored; key bound to one patient; device can be deactivated \\
+\bottomrule
+\end{longtable}
+
+\begin{warn}[Action needed outside the code]
+The repository's history (commit \code{91a158e}) contains an old
+\file{backend\codesl{}services\codesl{}auth\codesl{}\codedot{}env} with a real Gmail address, Gmail app password
+and JWT secret. The current code does not use that file, but the app password
+should be revoked in the Google account it belongs to, because anyone with
+access to the history can read it.
+\end{warn}
+
+\section{Known limitations and future work}
+
+\begin{itemize}
+  \item \textbf{Ledger anchoring.} Publish chain head hashes externally and
+    restrict the API's MongoDB user to insert-only on \code{ledgerentries}
+    (Section~\ref{sec:ledger-limits}). A move to Hyperledger Fabric would
+    replace \code{ledgerService} only.
+  \item \textbf{Payments.} \code{POST \codesl{}bills\codesl{}:id\codesl{}pay} records a payment; a real
+    payment gateway is not integrated.
+  \item \textbf{Performance and security testing.} A load test against the
+    200\,ms / 2\,s targets and an OWASP ZAP scan have not been run.
+  \item \textbf{Staging deployment.} CI builds and tests; there is no staging
+    environment to deploy to yet.
+  \item \textbf{Real-time updates.} Dashboards poll (notifications every 20\,s,
+    IoT monitor every 5\,s). WebSockets or server-sent events would push changes
+    instantly.
+  \item \textbf{Encryption at rest.} MongoDB's storage encryption or
+    field-level encryption for diagnoses would protect against stolen disks or
+    backups.
+  \item \textbf{Time zones.} Slots are computed in the server's local time; a
+    multi-site hospital would need per-hospital time zones.
+  \item \textbf{Accessibility audit.} Forms are labelled and keyboard usable, but
+    no formal WCAG audit has been done.
+\end{itemize}
+
+\section{Verification record}
+
+What was actually verified for this version:
+
+\begin{itemize}
+  \item Backend: 105 tests pass (Jest + Supertest, real MongoDB and Redis),
+    about 93\% line coverage; three consecutive runs were stable.
+  \item Frontend: 20 tests pass (Jest + jsdom).
+  \item In the browser: all four dashboards load every page without errors;
+    the full OTP login (code read from the development log); booking,
+    claim processing, break-glass and ledger verification through the UI; the
+    ``server unreachable'' state with the server stopped; real empty states for a
+    new account.
+  \item Scripts: seed, IoT simulator, tamper demo with restore, ledger verifier.
+  \item Docker: \code{docker compose up --build} produced a healthy stack that
+    seeded and verified inside the container.
+  \item Not verified: delivery through real Gmail SMTP (needs the owner's app
+    password), the GitHub Actions run, load and ZAP testing.
+\end{itemize}

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "medichain",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "backend/services/api", "run", "dev"],
+      "port": 8001
+    }
+  ]
+}

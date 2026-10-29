@@ -1,0 +1,104 @@
+%% =====================================================================
+\chapter{Introduction}\label{ch:intro}
+
+\section{What MediChain is}
+
+MediChain is a web platform that runs the day-to-day information flow of a
+hospital for four kinds of people:
+
+\begin{description}[leftmargin=2.4cm,style=nextline]
+  \item[Patients] book appointments, read their own medical records, decide which
+    doctors may see those records and for how long, follow their medications and
+    home-monitoring vital signs, pay bills and file insurance claims.
+  \item[Doctors] manage their schedule, ask patients for consent, write and amend
+    medical records, attach files such as lab reports, prescribe, watch live vital
+    signs from patients' devices, and in a genuine emergency open a record without
+    consent (``break-glass''), which is logged and reported.
+  \item[Administrators] verify the credentials of new doctors and insurance agents,
+    manage user accounts and IoT devices, configure the hospital, read the security
+    audit trail and check the integrity of the whole database.
+  \item[Insurance agents] work through a queue of claims, approve or deny them,
+    record settlements and read financial reports.
+\end{description}
+
+Two ideas run through the whole system and make it more than a CRUD application:
+
+\begin{enumerate}
+  \item \textbf{Zero trust.} No request is trusted because of where it comes from
+    or because the user logged in earlier. Every API call is authenticated, scored,
+    checked against the user's role, approval status and (for medical data) the
+    patient's consent, and the decision is recorded.
+  \item \textbf{Tamper evidence.} Every change to clinical or financial data, and
+    every access decision, is written to a hash chain: a sequence of entries where
+    each one contains the SHA-256 hash of the previous one. If anyone edits the
+    database directly, bypassing the application, the system can prove it.
+\end{enumerate}
+
+\section{The problem it addresses}
+
+Hospital data has three properties that make ordinary web-application practice
+insufficient:
+
+\begin{itemize}
+  \item \textbf{It is extremely sensitive.} A diagnosis or a prescription must be
+    visible only to the patient and the clinicians the patient has chosen.
+    ``Logged-in user with the doctor role'' is not a good enough rule.
+  \item \textbf{It must be trustworthy.} Insurance decisions, legal disputes and
+    clinical care all depend on records being exactly what the doctor wrote. A
+    silently edited record is worse than a missing one.
+  \item \textbf{Emergencies happen.} An unconscious patient cannot grant consent.
+    The system must allow emergency access without making it invisible.
+\end{itemize}
+
+The original MediChain research paper proposed Hyperledger Fabric (a blockchain)
+and IPFS (distributed file storage) to meet these needs. This implementation
+keeps the guarantees and replaces the heavy infrastructure with a hash-chain
+ledger and file hashes stored in MongoDB (Chapter~\ref{ch:architecture} explains
+the reasoning).
+
+\section{What changed from the starting point}
+
+When this work began, the repository contained a polished but static frontend
+(every number on every dashboard was hardcoded in JavaScript) and one backend
+service that handled login only. Table~\ref{tab:before-after} summarises what
+exists now.
+
+\begin{table}[H]
+\centering\small
+\caption{Starting point versus completed system}\label{tab:before-after}
+\begin{tabularx}{\textwidth}{@{}P{3.4cm}YY@{}}
+\toprule
+\textbf{Area} & \textbf{Before} & \textbf{Now} \\
+\midrule
+Backend & One auth service, 6 endpoints, a broken logout & One API service, 68 endpoints in 13 route files \\
+Frontend data & Hardcoded arrays, simulated login & Every screen loads from the API; real loading, empty and error states \\
+Login & Simulated in the browser & Password + emailed OTP, JWT with rotating refresh cookie \\
+Appointments, records, claims, admin & Not implemented & Implemented, tested, wired to all four dashboards \\
+Ledger & A JSON-lines audit file & Two hash chains in MongoDB, full verification, tamper demo \\
+Files & None & GridFS storage, SHA-256 anchored in the ledger, consent-gated downloads \\
+IoT vitals & Static numbers & Device API keys, ingestion endpoint, live monitor, alerts, simulator \\
+Tests & None & 105 backend + 20 frontend tests, about 93\% backend line coverage \\
+Deployment & None & Dockerfile, docker-compose, GitHub Actions CI \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{How to read this document}
+
+\begin{itemize}
+  \item Chapters~\ref{ch:requirements}--\ref{ch:setup} are the overview:
+    requirements, architecture and how to run the project. Read these first.
+  \item Chapters~\ref{ch:foundation}--\ref{ch:admin} walk through the backend one
+    module at a time. Each section states \emph{what} the module is for,
+    \emph{why} it is built that way, and then shows the real code with an
+    explanation of each part.
+  \item Chapter~\ref{ch:frontend} does the same for the browser code.
+  \item Chapters~\ref{ch:reference}--\ref{ch:demo} are reference material: data
+    model, full API list, tests, deployment, the demo script, the security model
+    and what is left to do.
+\end{itemize}
+
+Conventions: file paths are relative to the repository root unless they start
+with \file{src\codesl{}}, which means \file{backend\codesl{}services\codesl{}api\codesl{}src}.
+Code listings are exact copies; where a listing omits lines, the gap is marked
+with a \code{\codesl{}\codesl{} ...} comment.

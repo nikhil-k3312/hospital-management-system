@@ -1,0 +1,179 @@
+%% =====================================================================
+\chapter{Prescriptions, Vital Signs and IoT Devices}\label{ch:rxvitals}
+
+\section{Prescriptions}
+
+\textbf{Files.} \file{src\codesl{}models\codesl{}Prescription\codedot{}js},
+\file{src\codesl{}modules\codesl{}prescriptions\codesl{}prescriptions\codedot{}routes\codedot{}js}.
+
+A doctor with the patient's consent prescribes a medication with dosage,
+frequency, instructions, dates and a number of allowed refills. The patient sees
+active and past medications and can request a refill; the doctor approves or
+denies it.
+
+\begin{lstlisting}[language=JavaScript,caption={Refill request rules (\file{prescriptions.routes.js})}]
+router.post('/:id/refill-request', requireRole('patient'), validate(idParam), asyncHandler(async (req, res) => {
+  const rx = await Prescription.findOne({ _id: req.params.id, patientId: req.user.userId });
+  if (!rx) throw notFound('Prescription not found');
+  if (rx.status !== 'active') throw conflict('Only active prescriptions can be refilled', 'INVALID_TRANSITION');
+  if (rx.refillRequest.status === 'pending') throw conflict('A refill request is already pending', 'ALREADY_PENDING');
+  if (rx.refillsUsed >= rx.refillsAllowed) throw conflict('No refills remain on this prescription. Book an appointment for a new one.', 'NO_REFILLS');
+
+  rx.refillRequest = { status: 'pending', requestedAt: new Date(), decidedAt: null };
+  await chain(rx, 'REFILL_REQUESTED', req);
+  await notificationService.notify(rx.doctorId, {
+    type: 'warning', title: 'Refill request', message: `A patient requested a refill of ${rx.medication} ${rx.dosage}.`, page: 'prescriptions',
+  });
+  res.json({ success: true, message: 'Refill requested', data: rx });
+}));
+\end{lstlisting}
+
+\begin{lstlisting}[language=JavaScript,caption={The doctor decides (\file{prescriptions.routes.js})}]
+    if (action === 'approve_refill' || action === 'deny_refill') {
+      if (rx.refillRequest.status !== 'pending') throw conflict('There is no pending refill request', 'INVALID_TRANSITION');
+      const approved = action === 'approve_refill';
+      rx.refillRequest.status = approved ? 'approved' : 'denied';
+      rx.refillRequest.decidedAt = new Date();
+      if (approved) rx.refillsUsed += 1;
+      await chain(rx, approved ? 'REFILL_APPROVED' : 'REFILL_DENIED', req);
+      // ... notify the patient
+    } else {
+      if (rx.status !== 'active') throw conflict(`The prescription is already ${rx.status}`, 'INVALID_TRANSITION');
+      rx.status = action === 'complete' ? 'completed' : 'cancelled';
+      await chain(rx, action === 'complete' ? 'COMPLETE' : 'CANCEL', req);
+    }
+\end{lstlisting}
+
+The doctor can only act on prescriptions they wrote (the query includes
+\code{doctorId}). All rule violations return 409 with a precise message, which
+the dashboard shows as-is. Every change is chained in the ledger, so the
+dispensing history of a controlled drug can be audited.
+
+\section{Vital signs}
+
+\textbf{Files.} \file{src\codesl{}models\codesl{}VitalReading\codedot{}js}, \file{src\codesl{}models\codesl{}Device\codedot{}js},
+\file{src\codesl{}modules\codesl{}vitals\codesl{}vitals\codedot{}routes\codedot{}js}.
+
+\begin{lstlisting}[language=JavaScript,caption={Normal ranges and the abnormal check (\file{src/models/VitalReading.js})}]
+const VITAL_RANGES = {
+  heartRate: { min: 50, max: 110, unit: 'bpm', label: 'Heart rate' },
+  systolic: { min: 90, max: 140, unit: 'mmHg', label: 'Systolic BP' },
+  diastolic: { min: 60, max: 90, unit: 'mmHg', label: 'Diastolic BP' },
+  spo2: { min: 94, max: 100, unit: '%', label: 'Blood oxygen' },
+  temperature: { min: 36.1, max: 37.8, unit: 'C', label: 'Temperature' },
+  glucose: { min: 70, max: 180, unit: 'mg/dL', label: 'Blood glucose' },
+};
+
+/** Returns the names of the fields in `reading` that fall outside VITAL_RANGES. */
+function findAbnormal(reading) {
+  return Object.entries(VITAL_RANGES)
+    .filter(([field, range]) => reading[field] !== null && reading[field] !== undefined
+      && (reading[field] < range.min || reading[field] > range.max))
+    .map(([field]) => field);
+}
+\end{lstlisting}
+
+(The temperature unit in the source is the degree sign, \textdegree C.) The
+ranges are sent to the frontend with every vitals response, so the charts and
+tiles colour values with the same thresholds the server uses for alerts.
+
+\begin{lstlisting}[language=JavaScript,caption={Saving a reading and raising alerts (\file{vitals.routes.js})}]
+async function saveReading(patientId, values, source, deviceId = null) {
+  const reading = await VitalReading.create({
+    patientId, deviceId, source, ...values, abnormal: findAbnormal(values), recordedAt: values.recordedAt || new Date(),
+  });
+
+  if (reading.abnormal.length) {
+    const details = reading.abnormal.map((f) => `${VITAL_RANGES[f].label} ${reading[f]} ${VITAL_RANGES[f].unit}`).join(', ');
+    const patient = await User.findById(patientId).select('fullName');
+    const doctors = await AccessGrant.find({ patientId, status: 'active', expiresAt: { $gt: new Date() } }).distinct('doctorId');
+    await notificationService.notify(patientId, {
+      type: 'danger', title: 'Abnormal vital sign', message: `Out of normal range: ${details}.`, page: 'metrics',
+    });
+    await notificationService.notify(doctors, {
+      type: 'danger', title: `Vitals alert: ${patient.fullName}`, message: `Out of normal range: ${details}.`, page: 'iot',
+    });
+  }
+  return reading;
+}
+\end{lstlisting}
+
+Alerts go to the patient and to every doctor who \emph{currently} has consent:
+the consent model decides who is told, not just who can look.
+
+\section{IoT devices}
+
+\subsection{Registration and keys}
+
+An admin registers a device (serial number, type, patient). The server generates
+a random API key, stores only its SHA-256, and shows the key once:
+
+\begin{lstlisting}[language=JavaScript,caption={Device model (\file{src/models/Device.js})}]
+const deviceSchema = new mongoose.Schema({
+  serialNumber: { type: String, required: true, unique: true, trim: true },
+  name: { type: String, required: true, trim: true },
+  type: { type: String, enum: ['heart_monitor', 'bp_monitor', 'pulse_oximeter', 'thermometer', 'multi_parameter'], required: true },
+  patientId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  apiKeyHash: { type: String, required: true, unique: true },
+  status: { type: String, enum: ['active', 'inactive'], default: 'active' },
+  lastSeenAt: { type: Date, default: null },
+  registeredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+}, { timestamps: true });
+\end{lstlisting}
+
+\subsection{Ingestion}
+
+\begin{lstlisting}[language=JavaScript,caption={POST /api/devices/readings (\file{vitals.routes.js})}]
+router.post('/devices/readings', validate({ body: readingSchema }), asyncHandler(async (req, res) => {
+  const key = req.get('x-device-key');
+  if (!key) throw unauthorized('Device key required', 'NO_DEVICE_KEY');
+  const device = await Device.findOne({ apiKeyHash: crypto.createHash('sha256').update(key).digest('hex') });
+  if (!device || device.status !== 'active') throw unauthorized('Unknown or inactive device', 'INVALID_DEVICE');
+
+  const reading = await saveReading(device.patientId, req.body, 'device', device._id);
+  device.lastSeenAt = new Date();
+  await device.save();
+  res.status(201).json({ success: true, data: { readingId: reading._id, abnormal: reading.abnormal } });
+}));
+\end{lstlisting}
+
+\begin{howto}
+A device is not a user: it has no password, no OTP and no JWT. It proves its
+identity with its key, and the key's hash identifies the device and therefore
+the patient. A device cannot choose which patient a reading belongs to, so a
+stolen key can only add readings for one patient, and the admin can deactivate
+the device at once. The Joi schema rejects physiologically impossible values
+(for example a heart rate of 400).
+\end{howto}
+
+\subsection{The doctor's live monitor}
+
+\code{GET \codesl{}api\codesl{}vitals\codesl{}monitor} returns, for every patient who currently allows
+this doctor in, the latest reading and the patient's devices with their
+\code{lastSeenAt}. The doctor's \emph{IoT Monitoring} page polls it, so readings
+from devices (or from the simulator) appear within seconds.
+
+\subsection{The simulator}
+
+\file{scripts\codesl{}iot-simulator\codedot{}js} stands in for real hardware. It
+reads the seeded device keys from \file{scripts\codesl{}\codedot{}demo-devices\codedot{}json} (git-ignored)
+and posts readings to the real ingestion endpoint:
+
+\begin{lstlisting}[language=JavaScript,caption={Simulated readings (\file{scripts/iot-simulator.js})}]
+function readingFor(device) {
+  if (spike) {
+    return device.type === 'pulse_oximeter'
+      ? { heartRate: Math.round(vary(128, 4)), spo2: Math.round(vary(89, 1)) }
+      : { heartRate: Math.round(vary(124, 4)), systolic: Math.round(vary(168, 4)), diastolic: Math.round(vary(104, 3)), spo2: 96, temperature: vary(37.2, 0.2) };
+  }
+  if (device.type === 'pulse_oximeter') return { heartRate: Math.round(vary(80, 6)), spo2: Math.round(vary(97, 1)) };
+  return {
+    heartRate: Math.round(vary(74, 6)), systolic: Math.round(vary(126, 5)), diastolic: Math.round(vary(81, 3)),
+    spo2: Math.round(vary(97.5, 1)), temperature: vary(36.8, 0.2),
+  };
+}
+\end{lstlisting}
+
+With \code{--spike}, the first reading from each device is clearly abnormal
+(blood pressure around 168/104, SpO\textsubscript{2} around 89\%) and later ones
+are normal again: a single burst that demonstrates the alert path end to end.

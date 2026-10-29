@@ -1,0 +1,392 @@
+%% =====================================================================
+\chapter{Backend Foundation}\label{ch:foundation}
+
+Before any feature, every request passes through the same foundation: the
+configuration, the Express application with its security middleware, input
+validation and the central error handler. This chapter explains each piece.
+
+\section{Life of a request}
+
+Take \code{GET \codesl{}api\codesl{}records?patientId=...} sent by a doctor. In order:
+
+\begin{enumerate}
+  \item \textbf{helmet} adds security headers (CSP, \code{nosniff}, \ldots).
+  \item \textbf{CORS}, \textbf{cookie-parser} and the \textbf{JSON parser}
+    (100\,kB limit) run.
+  \item The \textbf{rate limiter} counts the request against the caller's IP.
+  \item The router for \code{\codesl{}api\codesl{}records} runs \textbf{authenticate}: verify
+    the JWT, check it is not revoked, load the account state, compute the
+    trust score (Chapter~\ref{ch:zerotrust}).
+  \item \textbf{requireRole}\code{('patient','doctor', \{minTrustScore:70, allowBreakGlass:true\})}
+    checks the role, approval status and trust score.
+  \item \textbf{validate} checks the query string against a Joi schema.
+  \item The handler calls \textbf{consentService} (does this doctor have
+    consent?) and then MongoDB.
+  \item If anything throws, the \textbf{error handler} turns it into JSON.
+  \item Allow and deny decisions are written to the \textbf{access chain} of
+    the ledger.
+\end{enumerate}
+
+\section{Configuration: \file{src\codesl{}config\codesl{}config\codedot{}js}}
+
+\textbf{Purpose.} Turn environment variables into one typed object, and refuse
+to start if the configuration is missing or unsafe.
+
+\textbf{Why.} The original service started with missing secrets and failed
+later on the first login, with an obscure error. Failing at start-up is cheaper
+to debug and can never half-work in production.
+
+\begin{lstlisting}[language=JavaScript,caption={Start-up validation (\file{src/config/config.js})}]
+function validateConfig(cfg = config, rawEnv = env) {
+  const required = ['MONGODB_URI', 'JWT_SECRET', 'JWT_REFRESH_SECRET'];
+  if (cfg.email.transport === 'smtp') {
+    required.push('EMAIL_USER', 'EMAIL_PASSWORD');
+  }
+
+  const missing = required.filter((key) => !rawEnv[key] || String(rawEnv[key]).trim() === '');
+  if (missing.length > 0) {
+    throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
+  }
+
+  if (!['smtp', 'console', 'json'].includes(cfg.email.transport)) {
+    throw new Error(`EMAIL_TRANSPORT must be smtp, console or json (got "${cfg.email.transport}")`);
+  }
+
+  // Printing OTPs to a log is only acceptable on a developer machine.
+  if (cfg.isProduction && cfg.email.transport !== 'smtp') {
+    throw new Error('EMAIL_TRANSPORT must be "smtp" in production');
+  }
+
+  if (rawEnv.JWT_SECRET === rawEnv.JWT_REFRESH_SECRET) {
+    throw new Error('JWT_SECRET and JWT_REFRESH_SECRET must be different');
+  }
+
+  return true;
+}
+\end{lstlisting}
+
+\begin{howto}
+\begin{itemize}
+  \item Email credentials are required only when mail is really sent
+    (\code{smtp}).
+  \item The \code{console} transport prints OTP codes to the log, which is
+    convenient on a laptop and a security hole on a server, so production
+    rejects it.
+  \item If both JWT secrets were equal, a refresh token could be presented as an
+    access token. Requiring different secrets closes that.
+  \item The function takes \code{cfg} and \code{rawEnv} as parameters so unit
+    tests can call it with fake environments.
+\end{itemize}
+\end{howto}
+
+\section{Process start-up: \file{src\codesl{}server\codedot{}js}}
+
+\begin{lstlisting}[language=JavaScript,caption={Start-up order (\file{src/server.js})}]
+async function start() {
+  try {
+    config.validateConfig();
+    await connectMongo();
+    await connectRedis();
+    await HospitalSettings.getSingleton();
+    await emailService.verifyConnection();
+
+    const app = require('./app');
+    const server = app.listen(config.port, () => {
+      logger.info(`MediChain API listening on http://localhost:${config.port} (${config.nodeEnv})`);
+    });
+
+    const shutdown = (signal) => {
+      logger.info(`${signal} received, shutting down`);
+      server.close(async () => {
+        await Promise.allSettled([disconnectMongo(), disconnectRedis()]);
+        process.exit(0);
+      });
+      setTimeout(() => process.exit(1), 10000).unref();
+    };
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
+  } catch (error) {
+    logger.error(`Failed to start: ${error.message}`);
+    process.exit(1);
+  }
+}
+\end{lstlisting}
+
+\begin{howto}
+The server listens only after every dependency answered. \code{connectRedis}
+sends a \code{PING} and throws if Redis is not there (the old service swallowed
+this error and then failed every login). \code{HospitalSettings.getSingleton()}
+creates the settings document on first run. \code{verifyConnection} logs into
+SMTP so a wrong Gmail app password shows up in the log at start-up, not at the
+first login. On \code{SIGTERM} (Docker stop) the server stops accepting
+connections, finishes in-flight requests and closes the databases; if that takes
+longer than 10\,s it exits anyway.
+\end{howto}
+
+\section{The Express application: \file{src\codesl{}app\codedot{}js}}
+
+\subsection{Security headers and the Content-Security-Policy}
+
+\begin{lstlisting}[language=JavaScript,caption={helmet and CSP (\file{src/app.js})}]
+// The frontend is served by this same server, so a strict Content-Security-Policy
+// can allow scripts only from this origin plus two pinned CDNs. Inline <script>
+// and onclick="" handlers are blocked, which shuts the main door to XSS.
+app.use(helmet({
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      'script-src': ["'self'", 'https://cdn.jsdelivr.net', 'https://unpkg.com'],
+      'style-src': ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com', 'https://cdn.jsdelivr.net'],
+      'font-src': ["'self'", 'https://fonts.gstatic.com', 'data:'],
+      'img-src': ["'self'", 'data:', 'blob:', 'https://images.pexels.com'],
+      'connect-src': ["'self'"],
+      'frame-src': ["'self'", 'blob:'],
+      'object-src': ["'self'", 'blob:'],
+      'upgrade-insecure-requests': config.isProduction ? [] : null,
+    },
+  },
+  crossOriginEmbedderPolicy: false,
+}));
+\end{lstlisting}
+
+\begin{howto}
+A Content-Security-Policy tells the browser which sources it may load code from.
+With \code{script-src 'self'} and no \code{'unsafe-inline'}, even if an attacker
+manages to get \code{<script>alert(1)<\codesl{}script>} into a patient's name, the browser
+refuses to run it. This is why the frontend has no inline scripts and no
+\code{onclick=} attributes: all handlers are attached from \code{.js} files.
+\code{connect-src 'self'} means page scripts can only call this API. \code{blob:}
+in \code{frame-src}/\code{object-src} lets the dashboards preview downloaded PDFs.
+\end{howto}
+
+\subsection{Rate limits}
+
+\begin{lstlisting}[language=JavaScript,caption={Two rate limiters (\file{src/app.js})}]
+app.use('/api/', rateLimit({
+  windowMs, max: config.rateLimit.max, standardHeaders: true, legacyHeaders: false,
+  message: limiterResponse('Too many requests from this IP, please try again later.'),
+  skip: () => config.isTest,
+}));
+
+// Stricter budget for the endpoints an attacker would hammer to guess passwords or codes.
+const authLimiter = rateLimit({
+  windowMs, max: config.rateLimit.authMax, standardHeaders: true, legacyHeaders: false,
+  message: limiterResponse('Too many login attempts from this IP. Try again in 15 minutes.'),
+  skip: () => config.isTest,
+});
+app.use(['/api/auth/login', '/api/auth/register'], authLimiter);
+\end{lstlisting}
+
+The general limit protects the whole API; the second, much smaller budget
+(30 per 15 minutes by default) applies to login and registration, the endpoints
+used for password and OTP guessing. Per-account limits (lockout, OTP attempts)
+are added on top in Chapter~\ref{ch:auth}, so an attacker spreading requests
+over many IPs still hits a wall.
+
+\subsection{Routes and the bundled frontend}
+
+\begin{lstlisting}[language=JavaScript,caption={Module mounting and static frontend (\file{src/app.js})}]
+app.use('/api/auth', require('./modules/auth/auth.routes'));
+app.use('/api', require('./modules/users/users.routes'));
+app.use('/api/appointments', require('./modules/appointments/appointments.routes'));
+app.use('/api/consents', require('./modules/consents/consents.routes'));
+app.use('/api/records', require('./modules/records/records.routes'));
+app.use('/api/files', require('./modules/records/files.routes'));
+app.use('/api/prescriptions', require('./modules/prescriptions/prescriptions.routes'));
+app.use('/api', require('./modules/vitals/vitals.routes'));
+app.use('/api/bills', require('./modules/billing/billing.routes'));
+app.use('/api/claims', require('./modules/claims/claims.routes'));
+app.use('/api/notifications', require('./modules/notifications/notifications.routes'));
+app.use('/api/admin', require('./modules/admin/admin.routes'));
+app.use('/api/ledger', require('./modules/ledger/ledger.routes'));
+app.use('/api', notFoundHandler);
+
+// Same origin as the API: the SameSite=Strict refresh cookie just works and no
+// CORS is needed in the browser. Development files are never served.
+app.use((req, res, next) => (/^\/(node_modules|tests|package(-lock)?\.json|jest\.config)/.test(req.path) ? notFoundHandler(req, res) : next()));
+app.use(express.static(config.frontendDir, { index: 'homepage.html', extensions: ['html'] }));
+\end{lstlisting}
+
+The \code{\codesl{}api} 404 handler is mounted \emph{before} the static files, so a
+mistyped API path returns a JSON 404 instead of an HTML page. The regular
+expression blocks the frontend's development files (its \code{node\_modules},
+tests and \code{package.json}) from being served.
+
+\section{Errors: \file{src\codesl{}utils\codesl{}errors\codedot{}js} and the error handler}
+
+\begin{lstlisting}[language=JavaScript,caption={AppError and asyncHandler (\file{src/utils/errors.js})}]
+class AppError extends Error {
+  constructor(status, message, code, details) {
+    super(message);
+    this.name = 'AppError';
+    this.status = status;
+    this.code = code || undefined;
+    this.details = details || undefined;
+  }
+}
+
+const badRequest = (message, details) => new AppError(400, message, 'BAD_REQUEST', details);
+const unauthorized = (message, code = 'UNAUTHORIZED') => new AppError(401, message, code);
+const forbidden = (message, code = 'FORBIDDEN') => new AppError(403, message, code);
+const notFound = (message = 'Resource not found') => new AppError(404, message, 'NOT_FOUND');
+const conflict = (message, code = 'CONFLICT') => new AppError(409, message, code);
+// ...
+const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+\end{lstlisting}
+
+\begin{howto}
+Handlers simply \code{throw conflict('This slot has just been booked...', 'SLOT\_TAKEN')}.
+Express 4 does not catch errors thrown from \code{async} functions, so every
+handler is wrapped in \code{asyncHandler}, which forwards a rejected promise to
+\code{next(error)}. The central handler then produces the response. The
+machine-readable \code{code} lets the frontend react to specific errors (for
+example \code{SESSION\_ENDED} sends the user back to the login page).
+\end{howto}
+
+\begin{lstlisting}[language=JavaScript,caption={Central error handler, mapping section (\file{src/middleware/errorHandler.js})}]
+  if (err.message === 'REDIS_UNAVAILABLE') {
+    status = 503;
+    message = 'Security service temporarily unavailable. Please try again.';
+    code = 'SERVICE_UNAVAILABLE';
+  } else if (err instanceof multer.MulterError) {
+    status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+    message = err.code === 'LIMIT_FILE_SIZE' ? 'File is too large' : err.message;
+    code = err.code;
+  } else if (err.name === 'ValidationError') {
+    status = 400;
+    message = Object.values(err.errors).map((e) => e.message).join(', ');
+  } else if (err.name === 'CastError') {
+    status = 400;
+    message = `Invalid ${err.path}`;
+  } else if (err.code === 11000) {
+    status = 409;
+    message = 'A record with these details already exists';
+    code = 'DUPLICATE';
+  } else if (err.type === 'entity.too.large') {
+    status = 413;
+    message = 'Request body is too large';
+  } else if (err.type === 'entity.parse.failed') {
+    status = 400;
+    message = 'Malformed JSON body';
+  }
+
+  if (status >= 500) {
+    logger.error(`${req.method} ${req.originalUrl} -> ${err.stack || err.message}`);
+    if (config.isProduction) message = 'Internal server error';
+  }
+\end{lstlisting}
+
+Each branch converts a low-level failure into a meaningful HTTP status. The most
+important one is the first: when Redis is down, the security layer cannot check
+OTPs, refresh tokens or revocations, so the request fails with \textbf{503}
+(``fail closed'') rather than being let through. In production, details of
+unexpected (500) errors are logged but not sent to the client.
+
+\section{Input validation: \file{src\codesl{}middleware\codesl{}validate\codedot{}js}}
+
+\begin{lstlisting}[language=JavaScript,caption={The validate middleware (\file{src/middleware/validate.js})}]
+const validate = (schemas) => (req, res, next) => {
+  const errors = [];
+  for (const part of ['params', 'query', 'body']) {
+    if (!schemas[part]) continue;
+    const { error, value } = schemas[part].validate(req[part] || {}, {
+      abortEarly: false, stripUnknown: false, convert: true,
+    });
+    if (error) {
+      errors.push(...error.details.map((d) => d.message.replace(/"/g, '')));
+    } else if (part === 'query') {
+      Object.defineProperty(req, 'query', { value, writable: true, configurable: true });
+    } else {
+      req[part] = value;
+    }
+  }
+  if (errors.length) {
+    return res.status(400).json({ success: false, message: 'Validation failed', errors });
+  }
+  return next();
+};
+
+const objectId = () => Joi.string().pattern(/^[a-f\d]{24}$/i).message('must be a valid id');
+
+const password = () => Joi.string()
+  .min(8)
+  .max(128)
+  .pattern(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&#^()\-_=+]).+$/)
+\end{lstlisting}
+
+\begin{howto}
+Each route declares what it accepts, for example
+\code{validate(\{ body: Joi.object(\{ doctorId: objectId().required(), ... \}) \})}.
+\begin{itemize}
+  \item \code{abortEarly:false} reports \emph{every} problem at once, so a form
+    can show all errors together.
+  \item \code{stripUnknown:false} means unknown fields are an error, not silently
+    dropped: a client cannot sneak in \code{role:'admin'}.
+  \item \code{convert:true} turns \code{"7"} into \code{7} and ISO strings into
+    dates; the cleaned value replaces the original, so handlers work with
+    trusted, typed data. (\code{req.query} is a getter in newer Express, hence
+    \code{defineProperty}.)
+\end{itemize}
+\end{howto}
+
+\section{Databases: \file{src\codesl{}db\codesl{}}}
+
+\begin{lstlisting}[language=JavaScript,caption={GridFS bucket (\file{src/db/mongo.js})}]
+/**
+ * GridFS stores files larger than a normal document by splitting them into
+ * 255 kB chunks (collections `uploads.files` and `uploads.chunks`). It ships
+ * with the MongoDB driver, so no extra infrastructure is needed (decision D3).
+ */
+function getBucket() {
+  if (!bucket) {
+    bucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: 'uploads' });
+  }
+  return bucket;
+}
+\end{lstlisting}
+
+\begin{lstlisting}[language=JavaScript,caption={Redis connection that fails loudly (\file{src/db/redis.js})}]
+async function connectRedis() {
+  if (!redisClient.isOpen) {
+    await redisClient.connect();
+  }
+  await redisClient.ping();
+  return redisClient;
+}
+\end{lstlisting}
+
+\section{Hashing helpers: \file{src\codesl{}utils\codesl{}hash\codedot{}js}}
+
+These three functions underpin the ledger (Chapter~\ref{ch:ledger}).
+
+\begin{lstlisting}[language=JavaScript,caption={Canonical JSON and hashing (\file{src/utils/hash.js})}]
+const sha256 = (value) => crypto.createHash('sha256').update(typeof value === 'string' || Buffer.isBuffer(value) ? value : String(value ?? '')).digest('hex');
+
+/**
+ * Deterministic JSON: object keys are sorted at every level, so the same data
+ * always produces the same string (and therefore the same hash) no matter in
+ * which order the fields were assigned.
+ */
+function canonicalJSON(value) {
+  if (value === null || value === undefined) return 'null';
+  if (value instanceof Date) return JSON.stringify(value.toISOString());
+  if (Array.isArray(value)) return `[${value.map(canonicalJSON).join(',')}]`;
+  if (typeof value === 'object') {
+    if (typeof value.toHexString === 'function') return JSON.stringify(value.toHexString()); // ObjectId
+    const keys = Object.keys(value).filter((k) => value[k] !== undefined).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJSON(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+const hashObject = (value) => sha256(canonicalJSON(value));
+\end{lstlisting}
+
+\begin{howto}[Why canonical JSON matters]
+\code{JSON.stringify(\{a:1,b:2\})} and \code{JSON.stringify(\{b:2,a:1\})} produce
+different strings, and therefore different hashes, for the same data. MongoDB
+does not promise to return fields in the order they were written. Sorting the
+keys at every level, and writing dates and ObjectIds in one fixed format, makes
+the hash a function of the \emph{data} only. Without this, verification would
+report false tampering.
+\end{howto}

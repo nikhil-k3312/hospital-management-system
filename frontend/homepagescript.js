@@ -1,4 +1,4 @@
-// HealthConnect Website JavaScript - Production Ready
+// MediChain Website JavaScript - Production Ready
 // Version: 2.0.0
 
 (function() {
@@ -16,8 +16,6 @@
     const CONSTANTS = {
         SCROLL_THRESHOLD: 50,
         BACK_TO_TOP_THRESHOLD: 300,
-        EXIT_INTENT_DELAY: 60000,
-        EXIT_INTENT_THRESHOLD: 5,
         SCROLLSPY_OFFSET: 100
     };
 
@@ -35,21 +33,12 @@
         cookieAcceptBtn: document.getElementById('cookie-accept'),
         cookieDeclineBtn: document.getElementById('cookie-decline'),
         cookieDismissBtn: document.getElementById('cookie-dismiss'),
-        leadModal: document.getElementById('leadModal'),
         requestDemoBtn: document.getElementById('requestDemoBtn'),
         getStartedBtn: document.getElementById('getStartedBtn'),
         learnMoreBtn: document.getElementById('learnMoreBtn'),
-        modalClose: document.getElementById('modalClose'),
-        leadForm: document.getElementById('leadForm'),
-        successMessage: document.getElementById('successMessage'),
-        closeSuccessBtn: document.getElementById('closeSuccessBtn'),
         tourBtn: document.getElementById('tourBtn'),
         mobileDemoBtn: document.getElementById('mobileDemoBtn')
     };
-
-    // State
-    let exitIntentShown = false;
-    const pageLoadTime = Date.now();
 
     // ============================================
     // INITIALIZATION
@@ -63,7 +52,7 @@
             applySavedTheme();
             showCookieConsentIfNeeded();
             updateCopyrightYear();
-            devLog('✅ HealthConnect initialized successfully');
+            devLog('✅ MediChain initialized successfully');
         } catch (error) {
             devError('❌ Initialization error:', error);
             // Graceful degradation - site still works
@@ -110,22 +99,16 @@
         elements.cookieDeclineBtn?.addEventListener('click', handleCookieDecline);
         elements.cookieDismissBtn?.addEventListener('click', handleCookieDismiss);
         
-        // Modal
-        elements.requestDemoBtn?.addEventListener('click', openModal);
-        elements.getStartedBtn?.addEventListener('click', openModal);
+        // Both calls to action open real registration (there is no fake "demo request" form).
+        elements.requestDemoBtn?.addEventListener('click', goToRegistration);
+        elements.getStartedBtn?.addEventListener('click', goToRegistration);
         elements.learnMoreBtn?.addEventListener('click', () => {
             document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' });
         });
-        elements.modalClose?.addEventListener('click', closeModal);
-        elements.closeSuccessBtn?.addEventListener('click', closeModal);
-        elements.leadModal?.addEventListener('click', handleModalOverlayClick);
         
         // Tour
         elements.tourBtn?.addEventListener('click', startProductTour);
         elements.mobileDemoBtn?.addEventListener('click', startProductTour);
-        
-        // Form
-        elements.leadForm?.addEventListener('submit', handleFormSubmit);
         
         // Use cases
         document.querySelectorAll('.toggle-btn').forEach(btn => {
@@ -137,8 +120,6 @@
             question.addEventListener('click', handleFaqToggle);
         });
         
-        // Exit intent
-        document.addEventListener('mouseout', handleExitIntent);
         
         // Window events
         window.addEventListener('resize', throttle(handleResize, 250));
@@ -153,7 +134,6 @@
     // COMPONENTS
     // ============================================
     function initializeComponents() {
-        initFormValidation();
         initIntersectionObservers();
         initDashboardEffects();
         initTimelineSVG();
@@ -183,7 +163,7 @@
     // ============================================
     function updateCopyrightYear() {
         const el = document.getElementById('copyright-year');
-        if (el) el.textContent = `© ${new Date().getFullYear()} HealthConnect. All rights reserved.`;
+        if (el) el.textContent = `© ${new Date().getFullYear()} MediChain.`;
     }
 
     // ============================================
@@ -311,145 +291,8 @@
     // ============================================
     // MODAL
     // ============================================
-    function openModal() {
-        if (getCookie('dontShowModal') === 'true') return;
-        
-        elements.leadModal?.classList.add('active');
-        document.body.style.overflow = 'hidden';
-        
-        setTimeout(() => {
-            elements.leadModal?.querySelector('input')?.focus();
-        }, 100);
-    }
-
-    function closeModal() {
-        elements.leadModal?.classList.remove('active');
-        document.body.style.overflow = '';
-        
-        if (elements.successMessage) elements.successMessage.classList.remove('active');
-        if (elements.leadForm) elements.leadForm.style.display = 'block';
-        
-        resetFormState();
-    }
-
-    function handleModalOverlayClick(e) {
-        if (e.target === elements.leadModal) {
-            const hasContent = Array.from(new FormData(elements.leadForm).values())
-                .some(v => v.trim() !== '');
-            
-            if (!hasContent || confirm('You have unsaved changes. Close anyway?')) {
-                closeModal();
-            }
-        }
-    }
-
-    // ============================================
-    // FORM
-    // ============================================
-    function initFormValidation() {
-        const form = elements.leadForm;
-        if (!form) return;
-        
-        const fields = {
-            email: form.querySelector('#workEmail'),
-            company: form.querySelector('#companyName'),
-            name: form.querySelector('#fullName'),
-            role: form.querySelector('#role')
-        };
-        
-        const submitBtn = form.querySelector('button[type="submit"]');
-        submitBtn.disabled = true;
-        
-        // Real-time validation
-        fields.email?.addEventListener('input', debounce(() => validateField(fields.email, validateEmail), 300));
-        fields.company?.addEventListener('input', debounce(() => validateField(fields.company, validateCompany), 300));
-        fields.name?.addEventListener('input', debounce(() => validateField(fields.name, validateName), 300));
-        fields.role?.addEventListener('change', () => validateField(fields.role, validateRole));
-        
-        // Update submit button
-        form.addEventListener('input', debounce(() => {
-            const allValid = Object.values(fields).every(f => f?.value.trim());
-            submitBtn.disabled = !allValid;
-        }, 300));
-    }
-
-    function validateField(field, validator) {
-        const result = validator(field.value.trim());
-        
-        if (result.valid) {
-            field.classList.remove('is-invalid');
-            field.classList.add('is-valid');
-            field.parentNode.querySelector('.error-message')?.remove();
-        } else {
-            field.classList.add('is-invalid');
-            field.classList.remove('is-valid');
-            
-            const existing = field.parentNode.querySelector('.error-message');
-            if (existing) existing.remove();
-            
-            const error = document.createElement('span');
-            error.className = 'error-message';
-            error.setAttribute('role', 'alert');
-            error.textContent = result.message;
-            field.parentNode.appendChild(error);
-        }
-        
-        return result.valid;
-    }
-
-    function validateEmail(value) {
-        if (!value) return { valid: false, message: 'Email is required' };
-        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
-            return { valid: false, message: 'Please enter a valid email' };
-        }
-        return { valid: true };
-    }
-
-    function validateCompany(value) {
-        if (!value) return { valid: false, message: 'Company name is required' };
-        if (value.length < 2) return { valid: false, message: 'Too short' };
-        return { valid: true };
-    }
-
-    function validateName(value) {
-        if (!value) return { valid: false, message: 'Name is required' };
-        if (value.length < 2) return { valid: false, message: 'Too short' };
-        return { valid: true };
-    }
-
-    function validateRole(value) {
-        if (!value) return { valid: false, message: 'Please select a role' };
-        return { valid: true };
-    }
-
-    function handleFormSubmit(e) {
-        e.preventDefault();
-        
-        const btn = e.target.querySelector('button[type="submit"]');
-        btn.disabled = true;
-        btn.textContent = 'Submitting...';
-        
-        // Simulate API call
-        setTimeout(() => {
-            elements.leadForm.style.display = 'none';
-            elements.successMessage.classList.add('active');
-            
-            btn.disabled = false;
-            btn.textContent = 'Request Demo';
-            
-            setCookie('leadFormSubmitted', 'true', 7);
-            resetFormState();
-            
-            devLog('✅ Form submitted');
-        }, 1500);
-    }
-
-    function resetFormState() {
-        elements.leadForm?.reset();
-        document.querySelectorAll('.form-control').forEach(field => {
-            field.classList.remove('is-valid', 'is-invalid');
-            field.parentNode.querySelector('.error-message')?.remove();
-        });
+    function goToRegistration() {
+        window.location.href = '/login.html#register';
     }
 
     // ============================================
@@ -548,10 +391,24 @@
         }
     }
 
-    function initStatsCounter() {
+    /**
+     * Fetches live, anonymous counts from GET /api/public/stats and animates them.
+     * If the server is unreachable the numbers stay as "–" (a real error state, not fake figures).
+     */
+    async function initStatsCounter() {
+        let stats;
+        try {
+            const res = await fetch('/api/public/stats');
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            stats = (await res.json()).data;
+        } catch (error) {
+            devWarn('Live stats unavailable:', error);
+            document.querySelectorAll('.stat-number').forEach(el => { el.title = 'Server unreachable'; });
+            return;
+        }
         document.querySelectorAll('.stat-number').forEach(counter => {
-            const target = +counter.getAttribute('data-target');
-            const increment = target / 200;
+            const target = Number(stats[counter.getAttribute('data-stat')] || 0);
+            const increment = Math.max(target / 60, 1);
             let current = 0;
             
             const update = () => {
@@ -593,7 +450,7 @@
                     {
                         element: '.hero-content',
                         popover: {
-                            title: 'Welcome to HealthConnect',
+                            title: 'Welcome to MediChain',
                             description: 'Your unified healthcare platform.',
                             side: 'bottom'
                         }
@@ -621,20 +478,6 @@
         } catch (error) {
             devError('❌ Tour error:', error);
             alert('Unable to start tour.');
-        }
-    }
-
-    // ============================================
-    // EXIT INTENT
-    // ============================================
-    function handleExitIntent(e) {
-        if (exitIntentShown || 
-            Date.now() - pageLoadTime < CONSTANTS.EXIT_INTENT_DELAY ||
-            getCookie('dontShowModal') === 'true') return;
-        
-        if (e.clientY <= CONSTANTS.EXIT_INTENT_THRESHOLD && e.relatedTarget === null) {
-            exitIntentShown = true;
-            openModal();
         }
     }
 
@@ -691,17 +534,6 @@
 
     function cleanup() {
         devLog('🧹 Cleanup');
-    }
-
-    // ============================================
-    // SERVICE WORKER
-    // ============================================
-    if ('serviceWorker' in navigator && !isDev) {
-        window.addEventListener('load', () => {
-            navigator.serviceWorker.register('/sw.js')
-                .then(reg => devLog('✅ SW registered'))
-                .catch(err => devWarn('⚠️ SW failed:', err));
-        });
     }
 
     // ============================================

@@ -1,0 +1,137 @@
+%% =====================================================================
+\chapter{Setup and Running}\label{ch:setup}
+
+\section{Prerequisites}
+
+\begin{itemize}
+  \item Node.js 18 or newer (developed on 24, Docker image uses 20).
+  \item MongoDB 6+ and Redis 6+, either installed locally (macOS:
+    \code{brew install mongodb-community redis}) or through Docker.
+  \item For real OTP emails: a Gmail account with 2-step verification and an
+    \emph{app password} (Google Account $\to$ Security $\to$ App passwords).
+\end{itemize}
+
+\section{Environment variables}\label{sec:env}
+
+All configuration comes from \file{backend\codesl{}services\codesl{}api\codesl{}\codedot{}env}
+(copied from \file{\codedot{}env\codedot{}example} at the repository root; the real
+\file{\codedot{}env} is git-ignored).
+
+\begin{longtable}{@{}P{4.6cm}P{2.6cm}P{6.8cm}@{}}
+\caption{Environment variables}\label{tab:env}\\
+\toprule
+\textbf{Variable} & \textbf{Default} & \textbf{Meaning} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Variable} & \textbf{Default} & \textbf{Meaning} \\
+\midrule
+\endhead
+\code{PORT} & 8001 & HTTP port (API and frontend) \\
+\code{NODE\_ENV} & development & \code{production} enables secure cookies, hides error details, requires SMTP \\
+\code{MONGODB\_URI} & \emph{required} & e.g. \code{mongodb:\codesl{}\codesl{}127.0.0.1:27017\codesl{}medichain} \\
+\code{JWT\_SECRET} & \emph{required} & Signs access tokens; \code{openssl rand -hex 64} \\
+\code{JWT\_REFRESH\_SECRET} & \emph{required} & Signs refresh tokens; must differ from \code{JWT\_SECRET} \\
+\code{JWT\_EXPIRY} & 15m & Access-token lifetime \\
+\code{JWT\_REFRESH\_EXPIRY\_DAYS} & 7 & Refresh-token lifetime \\
+\code{EMAIL\_TRANSPORT} & smtp & \code{smtp} sends mail; \code{console} prints it to the log (development only); \code{json} keeps it in memory (tests) \\
+\code{EMAIL\_SERVICE} & -- & Nodemailer service name, e.g. \code{gmail} \\
+\code{EMAIL\_USER}, \code{EMAIL\_PASSWORD} & \emph{required for smtp} & Gmail address and app password \\
+\code{EMAIL\_FROM} & \code{EMAIL\_USER} & Sender shown in emails \\
+\code{OTP\_EXPIRY\_MINUTES} & 10 & OTP lifetime \\
+\code{OTP\_LENGTH} & 6 & Digits per OTP \\
+\code{OTP\_MAX\_ATTEMPTS} & 10 & OTP requests + wrong codes per email per 15 minutes \\
+\code{REDIS\_HOST}, \code{REDIS\_PORT}, \code{REDIS\_DB} & localhost, 6379, 0 & Redis connection \\
+\code{MIN\_TRUST\_SCORE} & 50 & Trust score needed for any authenticated request \\
+\code{HIGH\_SENSITIVITY\_TRUST\_SCORE} & 70 & Trust score needed for medical records and files \\
+\code{MAX\_FAILED\_LOGINS} & 5 & Failures before the account locks \\
+\code{ACCOUNT\_LOCK\_MINUTES} & 30 & Lock duration \\
+\code{RATE\_LIMIT\_WINDOW\_MINUTES} & 15 & Rate-limit window \\
+\code{RATE\_LIMIT\_MAX} & 1000 & Requests per IP per window, all of \code{\codesl{}api} \\
+\code{AUTH\_RATE\_LIMIT\_MAX} & 30 & Requests per IP per window to login and register \\
+\code{MAX\_UPLOAD\_MB} & 10 & Largest accepted file \\
+\code{ALLOWED\_ORIGINS} & \code{http:\codesl{}\codesl{}localhost:8001} & Cross-origin callers (the bundled frontend needs none) \\
+\code{SEED\_EMAIL\_BASE} & -- & Seed only: demo accounts become plus-addresses of this email \\
+\code{SEED\_DEMO\_PASSWORD} & -- & Seed only: password shared by all demo accounts \\
+\bottomrule
+\end{longtable}
+
+\begin{note}[Plus-addressing for the demo]
+Gmail delivers \code{you+patient@gmail.com} to \code{you@gmail.com}. The seed
+script creates every demo account as such an address of \code{SEED\_EMAIL\_BASE},
+so one inbox receives the OTP codes of all eight demo users, yet each account
+still has its own unique email.
+\end{note}
+
+\section{Running locally}
+
+\begin{lstlisting}[style=shell,caption={First run on macOS}]
+brew services start mongodb-community
+brew services start redis
+cp .env.example backend/services/api/.env     # then edit it (Section 4.2)
+cd backend/services/api
+npm install
+npm run seed -- --reset                        # demo hospital
+npm run dev                                    # http://localhost:8001
+\end{lstlisting}
+
+\section{Running with Docker}
+
+\begin{lstlisting}[style=shell,caption={Docker Compose}]
+docker compose up --build -d                   # mongo + redis + api
+docker compose exec api node scripts/seed.js --reset
+\end{lstlisting}
+
+The compose file runs the API with \code{NODE\_ENV=production}, which requires
+\code{EMAIL\_TRANSPORT=smtp}. To try it with console OTPs instead, start it with
+\code{NODE\_ENV=development docker compose up --build -d}.
+
+\section{Scripts}
+
+\begin{table}[H]
+\centering\small
+\caption{npm scripts in \file{backend\codesl{}services\codesl{}api}}\label{tab:scripts}
+\begin{tabularx}{\textwidth}{@{}P{5.2cm}Y@{}}
+\toprule
+\textbf{Command} & \textbf{Purpose} \\
+\midrule
+\code{npm run dev} / \code{npm start} & Start with auto-reload (nodemon) / plain node \\
+\code{npm test} & All backend tests (own databases, never touches dev data) \\
+\code{npm run test:coverage} & Tests with a coverage report \\
+\code{npm run seed -- --reset} & Drop the database and load the demo hospital \\
+\code{npm run demo:iot} & Stream device readings (\code{--interval N}, \code{--spike}) \\
+\code{npm run demo:tamper} & Edit a record directly in MongoDB (\code{--ledger}, \code{--restore}) \\
+\code{npm run ledger:verify} & Full integrity check from the command line \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{The demo data}\label{sec:seed}
+
+\file{scripts\codesl{}seed\codedot{}js} creates a small but realistic hospital
+so that every screen has something to show:
+
+\begin{itemize}
+  \item hospital settings (departments, four insurers, booking window);
+  \item one admin; Dr Ananya Iyer (Cardiology) and Dr Rahul Menon
+    (Endocrinology), both verified; Dr Kavya Reddy (Dermatology), pending;
+    agent Priya Sharma (Star Health);
+  \item patients Arjun Mehta (hypertension, consent to Dr Iyer, BP monitor),
+    Meera Nair (type 2 diabetes, pulse oximeter) and Rohan Gupta (no consent to
+    anyone: the break-glass patient);
+  \item past, today's and upcoming appointments; records with real attached
+    files; prescriptions including a pending refill; bills and claims in
+    several states; seven days of device readings; notifications.
+\end{itemize}
+
+The seed is a script, not application code: it writes directly to MongoDB.
+But it writes every protected document through \code{ledgerService} exactly as
+the API would, so ``Verify ledger'' reports a valid chain straight after
+seeding.
+
+\begin{lstlisting}[language=JavaScript,caption={How the seed derives demo emails (\file{scripts/seed.js})}]
+const base = requireEnv('SEED_EMAIL_BASE');
+// ...
+const [local, domain] = base.split('@');
+const email = (tag) => `${local}+${tag}@${domain}`;   // you+patient@gmail.com
+\end{lstlisting}

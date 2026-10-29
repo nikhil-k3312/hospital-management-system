@@ -1,0 +1,175 @@
+%% =====================================================================
+\chapter{Billing and Insurance Claims}\label{ch:billing}
+
+\textbf{Files.} \file{src\codesl{}models\codesl{}Bill\codedot{}js}, \file{src\codesl{}models\codesl{}Claim\codedot{}js},
+\file{src\codesl{}modules\codesl{}billing\codesl{}}, \file{src\codesl{}modules\codesl{}claims\codesl{}claims\codedot{}routes\codedot{}js}.
+
+\section{Bills}
+
+A bill is never typed in by hand. It is raised automatically when a doctor
+marks an appointment \emph{completed}, at the doctor's consultation fee:
+
+\begin{lstlisting}[language=JavaScript,caption={createBillForAppointment (\file{src/modules/billing/billing.service.js})}]
+/** Human-readable unique number, e.g. "B-20261027-3FA9C1". */
+function makeNumber(prefix) {
+  const d = new Date();
+  const date = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+  return `${prefix}-${date}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+}
+
+/** Raises the consultation bill when a doctor completes an appointment. */
+async function createBillForAppointment(appointment, doctor, actor) {
+  const bill = await Bill.create({
+    billNumber: makeNumber('B'),
+    patientId: appointment.patientId,
+    doctorId: appointment.doctorId,
+    appointmentId: appointment._id,
+    description: `Consultation with Dr. ${doctor.fullName} (${doctor.doctorProfile.specialization || 'General'})`,
+    amount: doctor.doctorProfile.consultationFee,
+  });
+  await ledgerService.recordEvent({ entityType: 'bill', entity: bill, action: 'CREATE', actor });
+  // ... notify the patient: "A bill of Rs. ... was raised"
+  return bill;
+}
+\end{lstlisting}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=1.1cm and 2.5cm]
+  \node[box] (u) {unpaid};
+  \node[box,right=of u] (cp) {claim\_pending};
+  \node[box,right=of cp,draw=okgreen,fill=green!6] (cov) {covered};
+  \node[box,below=of cov] (pc) {partially\_covered};
+  \node[box,below=of u,draw=okgreen,fill=green!6] (paid) {paid};
+  \draw[arr] (u) -- node[lbl,above]{claim filed} (cp);
+  \draw[arr] (cp) -- node[lbl,above]{settled in full} (cov);
+  \draw[arr] (cp) -- node[lbl,above,sloped]{settled in part} (pc);
+  \draw[arr] (cp.south) to[bend left=20] node[lbl,below]{claim denied} (u.south east);
+  \draw[arr] (u) -- node[lbl,left]{patient pays} (paid);
+  \draw[arr] (pc) -- node[lbl,below]{patient pays balance} (paid);
+\end{tikzpicture}
+\caption{Bill states}\label{fig:bill}
+\end{figure}
+
+\code{POST \codesl{}api\codesl{}bills\codesl{}:id\codesl{}pay} records that the patient paid the outstanding
+balance (amount minus what insurance covered). There is no payment gateway:
+the endpoint records the payment and chains it in the ledger
+(\code{PAYMENT\_RECORDED}). Connecting a real gateway is listed as future work.
+
+\section{Claims}
+
+\subsection{Filing a claim}
+
+\begin{lstlisting}[language=JavaScript,caption={POST /api/claims (\file{claims.routes.js})}]
+    const patient = await User.findById(req.user.userId);
+    const { insuranceProvider, policyNumber } = patient.patientProfile;
+    if (!insuranceProvider || !policyNumber) {
+      throw badRequest('Add your insurance provider and policy number in Settings before filing a claim');
+    }
+    const bill = await Bill.findOne({ _id: req.body.billId, patientId: patient._id });
+    if (!bill) throw notFound('Bill not found');
+    if (bill.status !== 'unpaid') throw conflict(`This bill is ${bill.status.replace('_', ' ')} and cannot be claimed`, 'INVALID_TRANSITION');
+
+    const claim = new Claim({
+      claimNumber: makeNumber('CLM'),
+      patientId: patient._id,
+      billId: bill._id,
+      insuranceProvider,
+      policyNumber,
+      amount: bill.amount,
+      description: req.body.description || bill.description,
+      history: [{ status: 'submitted', by: req.user.userId, byRole: 'patient', note: 'Claim submitted' }],
+    });
+    await chain(claim, 'SUBMIT', req);
+    bill.status = 'claim_pending';
+    await bill.save();
+    // ... ledger entry for the bill, notify the insurer's agents
+\end{lstlisting}
+
+\begin{howto}
+A claim always refers to a real bill of the same patient, for the bill's exact
+amount; the patient cannot invent an amount. The provider and policy number come
+from the patient's profile. Only unpaid bills can be claimed, and filing moves
+the bill to \code{claim\_pending} so it cannot be claimed twice or paid while
+under review. Only agents of that insurer are notified.
+\end{howto}
+
+\subsection{The claim state machine}
+
+\begin{lstlisting}[language=JavaScript,caption={Allowed transitions (\file{src/models/Claim.js})}]
+const CLAIM_TRANSITIONS = {
+  submitted: ['under_review'],
+  under_review: ['approved', 'denied'],
+  approved: ['settled'],
+  denied: [],
+  settled: [],
+};
+\end{lstlisting}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=0.8cm and 1.3cm]
+  \node[box] (s) {submitted};
+  \node[box,right=of s] (r) {under\_review};
+  \node[box,right=of r] (a) {approved};
+  \node[box,right=of a,draw=okgreen,fill=green!6] (st) {settled};
+  \node[box,below=of a,draw=badred,fill=red!3] (d) {denied};
+  \draw[arr] (s) -- (r);
+  \draw[arr] (r) -- (a);
+  \draw[arr] (a) -- (st);
+  \draw[arr] (r) |- (d);
+\end{tikzpicture}
+\caption{Claim states}\label{fig:claim}
+\end{figure}
+
+\begin{lstlisting}[language=JavaScript,caption={Processing a claim (\file{claims.routes.js})}]
+    const { status, approvedAmount, note } = req.body;
+    if (!CLAIM_TRANSITIONS[claim.status].includes(status)) {
+      throw conflict(`A claim cannot move from "${claim.status}" to "${status}"`, 'INVALID_TRANSITION');
+    }
+    if (status === 'approved') {
+      if (approvedAmount === undefined) throw badRequest('approvedAmount is required to approve a claim');
+      if (approvedAmount > claim.amount) throw badRequest('approvedAmount cannot exceed the claimed amount');
+      claim.approvedAmount = approvedAmount;
+    }
+    if (status === 'denied' && !note) throw badRequest('Give a reason when denying a claim');
+
+    claim.status = status;
+    claim.agentId = req.user.userId;
+    if (note) claim.decisionNote = note;
+    claim.history.push({ status, by: req.user.userId, byRole: 'insurance_agent', note });
+
+    const bill = await Bill.findById(claim.billId);
+    if (status === 'settled') {
+      claim.settledAt = new Date();
+      claim.settlementReference = `STL-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+      bill.coveredAmount = claim.approvedAmount;
+      bill.status = claim.approvedAmount >= bill.amount ? 'covered' : 'partially_covered';
+    } else if (status === 'denied') {
+      bill.status = 'unpaid'; // the patient pays it themselves
+    }
+    await chain(claim, status.toUpperCase(), req, note ? { note } : undefined);
+\end{lstlisting}
+
+\begin{howto}
+\begin{itemize}
+  \item The transition table is the single source of truth: anything not listed
+    (for example \code{submitted $\to$ settled}) is a 409.
+  \item Approval needs an amount no larger than the claim; denial needs a
+    reason, which the patient sees.
+  \item Settling generates a settlement reference and updates the bill, so the
+    patient's Billing page shows what insurance paid and what is left.
+  \item Agents only see and act on claims of their own insurer
+    (\code{agentScope}); a claim of another insurer returns 404 or 403.
+  \item Every step is appended to the claim's \code{history} \emph{and} chained
+    in the ledger; the claim detail view shows both.
+\end{itemize}
+\end{howto}
+
+\subsection{Settlements and reports}
+
+\code{GET \codesl{}api\codesl{}claims\codesl{}settlements} lists settled claims. \code{GET \codesl{}api\codesl{}claims\codesl{}reports}
+aggregates, with MongoDB's aggregation pipeline, claims by status, claimed versus
+settled amounts per month, the approval rate and the average time from
+submission to settlement; the agent's \emph{Reports} page charts these numbers.
+All figures are computed from live data at request time.

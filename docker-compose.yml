@@ -1,0 +1,39 @@
+# Local stack: MongoDB + Redis + the MediChain API (which also serves the frontend).
+#   docker compose up --build -d
+#   docker compose exec api node scripts/seed.js --reset
+#   open http://localhost:8001
+# Secrets and email settings come from backend/services/api/.env (copy .env.example).
+services:
+  mongo:
+    image: mongo:7
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 10
+
+  api:
+    build: .
+    env_file: backend/services/api/.env
+    environment:
+      MONGODB_URI: mongodb://mongo:27017/medichain
+      REDIS_HOST: redis
+      NODE_ENV: ${NODE_ENV:-production}
+    ports:
+      - "8001:8001"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  mongo-data:

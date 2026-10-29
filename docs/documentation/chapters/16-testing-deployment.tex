@@ -1,0 +1,160 @@
+%% =====================================================================
+\chapter{Testing and Deployment}\label{ch:testing}
+
+\section{Backend tests}
+
+\textbf{Tools.} Jest runs the tests; Supertest sends real HTTP requests to the
+Express app in-process. Tests run against \emph{real} MongoDB and Redis, not
+mocks, because most of the guarantees under test (unique indexes, TTLs,
+concurrent appends) live in those systems.
+
+\subsection{Isolation}
+
+\begin{lstlisting}[language=JavaScript,caption={Test environment (\file{tests/env.js})}]
+// Runs before any module is loaded, so config.js sees the test settings.
+// Tests use their own MongoDB database and Redis DB index, never the dev data.
+process.env.NODE_ENV = 'test';
+// Each parallel Jest worker gets its own database and Redis DB index.
+const worker = Number(process.env.JEST_WORKER_ID || 1);
+process.env.MONGODB_URI = `${process.env.TEST_MONGODB_BASE || 'mongodb://127.0.0.1:27017/medichain_test'}_${worker}`;
+process.env.REDIS_DB = String(15 - ((worker - 1) % 8));
+process.env.JWT_SECRET = 'test-access-secret-0123456789abcdef';
+process.env.JWT_REFRESH_SECRET = 'test-refresh-secret-fedcba9876543210';
+process.env.EMAIL_TRANSPORT = 'json';
+\end{lstlisting}
+
+Running the tests never touches the development database or sends an email:
+they use \code{medichain\_test\_<n>} databases, Redis DB 8--15, and the
+\code{json} mail transport, which renders messages in memory.
+
+\subsection{Helpers that use the real login flow}
+
+\begin{lstlisting}[language=JavaScript,caption={Logging in inside a test (\file{tests/helpers.js})}]
+async function login(user, password = PASSWORD) {
+  let otp;
+  const spy = jest.spyOn(emailService, 'sendOTP').mockImplementation(async (email, code) => { otp = code; });
+  const step1 = await request(app).post('/api/auth/login/request-otp').set('User-Agent', 'jest').send({ email: user.email, password });
+  spy.mockRestore();
+  if (step1.status !== 200) throw new Error(`request-otp failed: ${step1.status} ${JSON.stringify(step1.body)}`);
+
+  const step2 = await request(app).post('/api/auth/login/verify-otp').set('User-Agent', 'jest').send({ email: user.email, otp });
+  if (step2.status !== 200) throw new Error(`verify-otp failed: ${step2.status} ${JSON.stringify(step2.body)}`);
+  const cookie = step2.headers['set-cookie'].find((c) => c.startsWith('refreshToken='));
+  return { token: step2.body.data.token, cookie, user: step2.body.data.user };
+}
+\end{lstlisting}
+
+There is no test-only login shortcut in the application. The helper goes
+through both real steps and only intercepts the email to read the code, so
+every test that logs in also exercises password checking, OTP hashing in Redis
+and token issuance. \code{resetDatabase} empties every collection and Redis
+before each test and re-creates indexes, so the uniqueness guarantees are
+present in every test.
+
+\subsection{What is tested}
+
+\begin{table}[H]
+\centering\small
+\caption{Backend test suites}\label{tab:tests}
+\begin{tabularx}{\textwidth}{@{}P{5cm}Y@{}}
+\toprule
+\textbf{File} & \textbf{Covers} \\
+\midrule
+\file{unit\codesl{}trustService\codedot{}test\codedot{}js} & Score penalties, policy order, break-glass rules, time windows \\
+\file{unit\codesl{}ledgerService\codedot{}test\codedot{}js} & Chaining, concurrent appends, each kind of tampering \\
+\file{unit\codesl{}slots-hash-config\codedot{}test\codedot{}js} & Slot generation, canonical JSON, config validation \\
+\file{integration\codesl{}auth\codedot{}test\codedot{}js} & Register, both login steps, wrong codes, lockout, rotation, logout, password change, Redis outage (503) \\
+\file{integration\codesl{}appointments\codedot{}test\codedot{}js} & Slots, booking, racing double-booking, transitions, cancellation \\
+\file{integration\codesl{}records\codedot{}test\codedot{}js} & Consent gate, break-glass, versions, files and hashes, tamper detection \\
+\file{integration\codesl{}clinical-financial\codedot{}test\codedot{}js} & Prescriptions, vitals and alerts, devices, billing, claims state machine, admin \\
+\file{integration\codesl{}edge-cases\codedot{}test\codedot{}js} & Error shapes, CSP and static files, rescheduling, directory, ledger browsing, email rendering \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{lstlisting}[language=JavaScript,caption={The double-booking race (\file{tests/integration/appointments.test.js})}]
+  test('the backend rejects double-booking, even when two requests race', async () => {
+    const { patient, other, doctorUser } = await world();
+    const slot = futureSlot();
+    const results = await Promise.all([book(patient, doctorUser._id, slot), book(other, doctorUser._id, slot)]);
+    expect(results.map((r) => r.status).sort()).toEqual([201, 409]);
+    expect(results.find((r) => r.status === 409).body.code).toBe('SLOT_TAKEN');
+    expect(await Appointment.countDocuments({ holdsSlot: true })).toBe(1);
+  });
+\end{lstlisting}
+
+\textbf{Result (October 2026):} 105 tests in 8 suites pass; coverage is about
+93\% of lines and 90\% of functions. Run with
+\code{npm test} or \code{npm run test:coverage} in \file{backend\codesl{}services\codesl{}api}.
+
+\section{Frontend tests}
+
+\file{frontend\codesl{}tests} uses Jest with the jsdom environment and
+\code{@testing-library\codesl{}dom}. \file{api\codedot{}test\codedot{}js} replaces \code{fetch} with a mock
+server and checks the Bearer header, the transparent refresh, that concurrent
+401s share one refresh, the \code{SESSION\_ENDED} path, error mapping, network
+failures and the break-glass header. \file{ui\codedot{}test\codedot{}js} checks escaping,
+formatters, the loading, empty and error states, the retry button, modal forms
+and toasts. 20 tests pass (\code{cd frontend \&\& npm test}).
+
+\section{Docker}
+
+\begin{lstlisting}[style=shell,caption={\file{Dockerfile}}]
+FROM node:20-alpine
+
+WORKDIR /app/backend/services/api
+COPY backend/services/api/package.json backend/services/api/package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+COPY backend/services/api/src ./src
+COPY backend/services/api/scripts ./scripts
+COPY frontend /app/frontend
+
+# Writable by the unprivileged user: winston logs and the seed's demo-device key file.
+RUN mkdir -p /app/backend/logs && chown -R node:node /app/backend/logs ./scripts
+
+ENV NODE_ENV=production PORT=8001
+EXPOSE 8001
+USER node
+HEALTHCHECK --interval=15s --timeout=3s --start-period=20s CMD wget -qO- http://127.0.0.1:8001/health || exit 1
+CMD ["node", "src/server.js"]
+\end{lstlisting}
+
+The image keeps the repository's layout (\file{backend\codesl{}services\codesl{}api} next to
+\file{frontend}) so the API finds the frontend at the same relative path as in
+development. It installs production dependencies only, runs as the
+unprivileged \code{node} user, and never contains a \file{\codedot{}env}
+(\file{\codedot{}dockerignore} excludes it); secrets are passed at run time.
+\file{docker-compose\codedot{}yml} adds MongoDB 7 and Redis 7 with health checks, and
+starts the API only when both are healthy. Verified locally: the stack starts,
+the seed runs inside the container and \code{ledger:verify} reports a valid
+ledger.
+
+\section{Continuous integration}
+
+\file{\codedot{}github\codesl{}workflows\codesl{}ci\codedot{}yml} runs on every push to \code{main} and every pull
+request:
+
+\begin{enumerate}
+  \item \textbf{backend}: starts MongoDB and Redis as service containers,
+    installs dependencies with \code{npm ci} and runs the tests with coverage;
+  \item \textbf{frontend}: runs the jsdom tests;
+  \item \textbf{docker}: after both pass, builds the image.
+\end{enumerate}
+
+The workflow has been written and its steps run locally; it has not yet run on
+GitHub at the time of writing.
+
+\section{Production checklist}
+
+\begin{itemize}
+  \item \code{NODE\_ENV=production}; \code{EMAIL\_TRANSPORT=smtp} with a working
+    app password; fresh random JWT secrets.
+  \item Serve over HTTPS (the refresh cookie is \code{Secure} in production)
+    behind a reverse proxy.
+  \item \code{ALLOWED\_ORIGINS} restricted to real origins.
+  \item MongoDB and Redis on a private network with authentication; ideally a
+    MongoDB user that can insert but not modify \code{ledgerentries}.
+  \item Back up MongoDB, and publish ledger head hashes regularly
+    (Section~\ref{sec:ledger-limits}).
+\end{itemize}

@@ -1,0 +1,204 @@
+%% =====================================================================
+%%  MediChain -- Complete Project Documentation
+%%  Build:  latexmk -pdf medichain-documentation.tex
+%% =====================================================================
+\documentclass[11pt,a4paper]{report}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.3cm]{geometry}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{listings}
+\usepackage[most]{tcolorbox}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit,calc,backgrounds}
+\usepackage{amsmath}
+\usepackage[hidelinks]{hyperref}
+\usepackage{bookmark}
+\usepackage{float}
+
+%% ---------------------------------------------------------------- colours
+\definecolor{brand}{HTML}{0F5E8C}
+\definecolor{brandlight}{HTML}{E6F1F8}
+\definecolor{okgreen}{HTML}{1E7B47}
+\definecolor{warnamber}{HTML}{A15C00}
+\definecolor{badred}{HTML}{B3261E}
+\definecolor{codebg}{HTML}{F6F8FA}
+\definecolor{codeframe}{HTML}{D0D7DE}
+\definecolor{kw}{HTML}{8250DF}
+\definecolor{str}{HTML}{0A3069}
+\definecolor{cmt}{HTML}{6E7781}
+
+\hypersetup{colorlinks=true,linkcolor=brand,urlcolor=brand,citecolor=brand}
+
+%% ---------------------------------------------------------------- headings
+\titleformat{\chapter}[display]
+  {\normalfont\bfseries\color{brand}}
+  {\Large\MakeUppercase{\chaptertitlename}\ \thechapter}
+  {6pt}{\Huge}
+\titlespacing*{\chapter}{0pt}{-10pt}{24pt}
+\titleformat{\section}{\normalfont\Large\bfseries\color{brand}}{\thesection}{0.8em}{}
+\titleformat{\subsection}{\normalfont\large\bfseries}{\thesubsection}{0.8em}{}
+\titleformat{\subsubsection}{\normalfont\normalsize\bfseries}{\thesubsubsection}{0.8em}{}
+\setcounter{secnumdepth}{3}
+\setcounter{tocdepth}{2}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\color{cmt}MediChain -- Project Documentation}
+\fancyhead[R]{\small\color{cmt}\nouppercase{\leftmark}}
+\fancyfoot[C]{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancypagestyle{plain}{\fancyhf{}\fancyfoot[C]{\small\thepage}\renewcommand{\headrulewidth}{0pt}}
+
+\setlist{itemsep=2pt,topsep=4pt}
+\setlength{\parskip}{4pt}
+\renewcommand{\arraystretch}{1.25}
+
+%% ---------------------------------------------------------------- code
+\lstdefinelanguage{JavaScript}{
+  keywords={const,let,var,function,async,await,return,if,else,for,while,new,class,
+            try,catch,throw,this,true,false,null,undefined,require,module,exports,
+            switch,case,break,default,typeof},
+  sensitive=true,
+  comment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  morestring=[b]',
+  morestring=[b]",
+  morestring=[b]`
+}
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{kw}\bfseries,
+  stringstyle=\color{str},
+  commentstyle=\color{cmt}\itshape,
+  backgroundcolor=\color{codebg},
+  frame=single, rulecolor=\color{codeframe},
+  breaklines=true, breakatwhitespace=false,
+  columns=fullflexible, keepspaces=true,
+  showstringspaces=false,
+  xleftmargin=4pt, xrightmargin=4pt,
+  aboveskip=8pt, belowskip=8pt,
+  literate={->}{{$\rightarrow$}}2
+}
+\newcommand{\codeus}{\textunderscore\penalty0\relax}
+\newcommand{\codesl}{/\penalty0\relax}
+\newcommand{\codedot}{.\penalty50\relax}
+\newcommand{\codepar}{(\penalty100\relax}
+\newcommand{\code}[1]{{\small\ttfamily\hyphenchar\font=-1\let\_\codeus #1}}
+\newcolumntype{P}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\setlength{\emergencystretch}{3em}
+\newcommand{\file}[1]{{\color{brand}\code{#1}}}
+
+%% ---------------------------------------------------------------- boxes
+\newtcolorbox{note}[1][Note]{colback=brandlight,colframe=brand,fonttitle=\bfseries,
+  title=#1,breakable,boxrule=0.6pt,arc=2pt}
+\newtcolorbox{warn}[1][Known issue]{colback=orange!6,colframe=warnamber,fonttitle=\bfseries,
+  title=#1,breakable,boxrule=0.6pt,arc=2pt}
+\newtcolorbox{good}[1][Why this matters]{colback=green!5,colframe=okgreen,fonttitle=\bfseries,
+  title=#1,breakable,boxrule=0.6pt,arc=2pt}
+
+\newcommand{\stDone}{\textcolor{okgreen}{\textbf{Done}}}
+\newcommand{\stPart}{\textcolor{warnamber}{\textbf{Partial}}}
+\newcommand{\stNo}{\textcolor{badred}{\textbf{Not built}}}
+
+%% ---------------------------------------------------------------- endpoint macro
+\newcommand{\apiroute}[3]{%
+  \par\smallskip\noindent
+  \colorbox{brand}{\textcolor{white}{\ttfamily\bfseries\,#1\,}}\;\texttt{\bfseries #2}%
+  \hfill{\small\color{cmt}#3}\par\smallskip}
+
+\tikzset{
+  box/.style={draw=brand,fill=brandlight,rounded corners=3pt,minimum height=0.9cm,
+              minimum width=2.6cm,align=center,font=\small},
+  store/.style={draw=okgreen,fill=green!6,cylinder,shape border rotate=90,aspect=0.18,
+              minimum height=1.2cm,minimum width=2.2cm,align=center,font=\small},
+  dashedbox/.style={draw=badred,dashed,fill=red!3,rounded corners=3pt,minimum height=0.9cm,
+              minimum width=2.6cm,align=center,font=\small},
+  arr/.style={-{Stealth[length=2.2mm]},thick,draw=black!70},
+  lbl/.style={font=\scriptsize,fill=white,inner sep=1pt}
+}
+
+%% ---------------------------------------------------------------- additions for v2
+\newcommand{\INR}{Rs.\,}
+\renewcommand{\lstlistlistingname}{List of Code Listings}
+\lstdefinestyle{shell}{language={},keywordstyle=,commentstyle=\color{cmt},morecomment=[l]{\#}}
+\lstdefinestyle{json}{language={},stringstyle=\color{str},morestring=[b]"}
+\newtcolorbox{howto}[1][How it works]{colback=black!3,colframe=black!55,fonttitle=\bfseries,
+  title=#1,breakable,boxrule=0.6pt,arc=2pt}
+
+%% =====================================================================
+\begin{document}
+
+%% ---------------------------------------------------------------- title
+\begin{titlepage}
+  \thispagestyle{empty}
+  \begin{tikzpicture}[remember picture,overlay]
+    \fill[brand] (current page.north west) rectangle ([yshift=-7.5cm]current page.north east);
+  \end{tikzpicture}
+  \vspace*{1.2cm}
+  {\color{white}\fontsize{40}{44}\selectfont\bfseries MediChain\par}
+  \vspace{0.3cm}
+  {\color{white}\LARGE Hospital Management Platform with a\\[2pt]Zero-Trust Security Layer and a Tamper-Evident Ledger\par}
+  \vspace{3.4cm}
+  {\Huge\bfseries\color{brand} Complete Project Documentation\par}
+  \vspace{0.4cm}
+  {\Large Version 2: the completed system, explained module by module\\ with the real source code\par}
+  \vspace{1.4cm}
+  \begin{tabular}{@{}ll@{}}
+    \textbf{Repository}   & \url{https://github.com/nikhil-k3312/hospital-management-system} \\
+    \textbf{Fork}         & \url{https://github.com/VSshashank/hospital-management-system} \\
+    \textbf{Code state}   & branch \code{feature/complete-medichain} \\
+    \textbf{Design source}& MediChain Research Paper v1.0 (AY 2025--2026), \file{PLAN\codedot{}md}, \file{AUDIT\codedot{}md} \\
+    \textbf{Team}         & AS (Blockchain \& Security), NI (Backend \& API), \\
+                          & SI (Full-Stack Integration), SH (Frontend \& UI/UX) \\
+    \textbf{Prepared}     & October 2026 \\
+  \end{tabular}
+  \vfill
+  \begin{note}[Who this is for]
+  Anyone who has never seen the project: a new developer, a reviewer, an examiner.
+  After reading it you should know what MediChain does and why, how every feature
+  works from the browser down to the database, how to run and demonstrate it, and
+  where to change it. Every code listing in this document is copied from the
+  repository; file names are given so you can open the original.
+  \end{note}
+\end{titlepage}
+
+\pagenumbering{roman}
+\tableofcontents
+\listoffigures
+\listoftables
+\lstlistoflistings
+\clearpage
+\pagenumbering{arabic}
+
+\input{chapters/01-introduction}
+\input{chapters/02-requirements}
+\input{chapters/03-architecture}
+\input{chapters/04-setup}
+\input{chapters/05-foundation}
+\input{chapters/06-authentication}
+\input{chapters/07-zero-trust}
+\input{chapters/08-ledger}
+\input{chapters/09-appointments}
+\input{chapters/10-records}
+\input{chapters/11-prescriptions-vitals}
+\input{chapters/12-billing-claims}
+\input{chapters/13-admin}
+\input{chapters/14-frontend}
+\input{chapters/15-reference}
+\input{chapters/16-testing-deployment}
+\input{chapters/17-demo-security}
+
+\end{document}

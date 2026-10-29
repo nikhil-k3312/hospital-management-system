@@ -3,50 +3,29 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HealthConnect - Unified Healthcare Platform</title>
+    <title>MediChain - Unified Healthcare Platform</title>
     
     <!-- SEO and Social Media Meta Tags -->
-    <meta name="description" content="HealthConnect is a HIPAA-compliant platform connecting patients, doctors, and insurance providers with secure, seamless healthcare coordination.">
+    <meta name="description" content="MediChain is a HIPAA-compliant platform connecting patients, doctors, and insurance providers with secure, seamless healthcare coordination.">
     <meta name="keywords" content="healthcare, healthtech, patient portal, doctor dashboard, insurance claims, medical records, HIPAA compliant">
     
     <!-- Open Graph / Facebook -->
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://www.healthconnect.com/">
-    <meta property="og:title" content="HealthConnect - Unified Healthcare Platform">
+    <meta property="og:title" content="MediChain - Unified Healthcare Platform">
     <meta property="og:description" content="Connecting care, empowering health. A secure HIPAA-compliant platform for patients, doctors, and insurers.">
     <meta property="og:image" content="https://images.unsplash.com/photo-1576091160399-112ba8d25d1f?ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D&auto=format&fit=crop&w=2070&q=80">
     
     <!-- Twitter -->
     <meta property="twitter:card" content="summary_large_image">
     <meta property="twitter:url" content="https://www.healthconnect.com/">
-    <meta property="twitter:title" content="HealthConnect - Unified Healthcare Platform">
+    <meta property="twitter:title" content="MediChain - Unified Healthcare Platform">
     <meta property="twitter:description" content="Connecting care, empowering health. A secure HIPAA-compliant platform for patients, doctors, and insurers.">
     <meta property="twitter:image" content="https://images.unsplash.com/photo-1576091160399-112ba8d25d1f?ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D&auto=format&fit=crop&w=2070&q=80">
     
     <!-- Favicon -->
     <link rel="icon" type="image/x-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%230d9488'><path d='M12 2L13.88 7.33L19.5 8.24L15.25 12.37L16.3 18.02L12 15.27L7.7 18.02L8.75 12.37L4.5 8.24L10.12 7.33L12 2Z'/></svg>">
     <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%230d9488'><path d='M12 2L13.88 7.33L19.5 8.24L15.25 12.37L16.3 18.02L12 15.27L7.7 18.02L8.75 12.37L4.5 8.24L10.12 7.33L12 2Z'/></svg>">
-    
-    <!-- Fixed Content Security Policy -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self'">
-    
-    <!-- Fixed Dark Mode Flicker Fix -->
-    <script>
-    (function() {
-        try {
-            const theme = document.cookie.match(/theme=([^;]+)/)?.[1];
-            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-            const shouldUseDark = theme === 'dark' || (!theme && prefersDark);
-            
-            if (shouldUseDark) {
-                document.documentElement.classList.add('dark-mode');
-                document.body.classList.add('dark-mode');
-            }
-        } catch (e) {
-            console.warn('Theme initialization failed:', e);
-        }
-    })();
-    </script>
     
     <!-- Professional Font Pairing & Performance Optimization -->
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -63,10 +42,10 @@
     {
         "@context": "https://schema.org",
         "@type": "Organization",
-        "name": "HealthConnect",
+        "name": "MediChain",
         "url": "https://www.healthconnect.com/",
         "logo": "https://www.healthconnect.com/logo.svg",
-        "description": "HealthConnect is a unified, secure platform that seamlessly integrates patients, doctors, and insurance providers for a modern healthcare experience.",
+        "description": "MediChain is a unified, secure platform that seamlessly integrates patients, doctors, and insurance providers for a modern healthcare experience.",
         "address": {
             "@type": "PostalAddress",
             "streetAddress": "123 Healthcare Ave",
@@ -244,7 +223,7 @@
                 <path d="M20 10C18.5 11 17 12.5 15.25 12.37" stroke="rgba(13, 148, 136, 0.3)" stroke-width="1"/>
                 <path d="M4 10C5.5 11 7 12.5 8.75 12.37" stroke="rgba(13, 148, 136, 0.3)" stroke-width="1"/>
             </svg>
-            <span>HealthConnect</span>
+            <span>MediChain</span>
         </a>
         
         <!-- Header Actions Container -->
@@ -253,7 +232,7 @@
                 <ul class="nav-links">
                     <li><a href="#features">Features</a></li>
                     <li><a href="#security">Security</a></li>
-                    <li><a href="#testimonials">Testimonials</a></li>
+                    <li><a href="#stats">Live stats</a></li>
                     <li><a href="#faq">FAQ</a></li>
                 </ul>
             </nav>
@@ -267,7 +246,7 @@
             </button>
             
             <!-- Login Button -->
-            <a href="../loginv2/login.html" class="login-btn">Log In</a>
+            <a href="login.html" class="login-btn">Log In</a>
         </div>
         
         <!-- Mobile Menu Toggle -->
@@ -287,7 +266,7 @@
                 <svg width="32" height="32" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                     <path d="M12 2L13.88 7.33L19.5 8.24L15.25 12.37L16.3 18.02L12 15.27L7.7 18.02L8.75 12.37L4.5 8.24L10.12 7.33L12 2Z" fill="#0d9488" stroke="#0d9488" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
-                <span>HealthConnect</span>
+                <span>MediChain</span>
             </a>
             <button class="mobile-nav-close">
                 <i data-lucide="x" aria-hidden="true"></i>
@@ -296,7 +275,7 @@
         <ul class="mobile-nav-links">
             <li><a href="#features">Features</a></li>
             <li><a href="#security">Security</a></li>
-            <li><a href="#testimonials">Testimonials</a></li>
+            <li><a href="#stats">Live stats</a></li>
             <li><a href="#faq">FAQ</a></li>
             <li><a href="patient.html">Patient Portal</a></li>
             <li><a href="doctor.html">Provider Portal</a></li>
@@ -311,11 +290,11 @@
         <section class="hero">
             <div class="hero-content fade-in">
                 <h1>Connecting Care, Empowering Health.</h1>
-                <p>HealthConnect is a unified, secure platform that seamlessly integrates patients, doctors, and insurance providers for a modern healthcare experience.</p>
+                <p>MediChain is a unified, secure platform that seamlessly integrates patients, doctors, and insurance providers for a modern healthcare experience.</p>
                 <div class="hero-buttons">
-                    <button class="btn-primary" id="requestDemoBtn" aria-label="Request a demo of HealthConnect platform">Request a Demo</button>
-                    <button class="btn-secondary" id="learnMoreBtn" aria-label="Learn more about HealthConnect features">Learn More</button>
-                    <button class="tour-btn" id="tourBtn" aria-label="Take a guided tour of HealthConnect platform">
+                    <button class="btn-primary" id="requestDemoBtn" aria-label="Request a demo of MediChain platform">Request a Demo</button>
+                    <button class="btn-secondary" id="learnMoreBtn" aria-label="Learn more about MediChain features">Learn More</button>
+                    <button class="tour-btn" id="tourBtn" aria-label="Take a guided tour of MediChain platform">
                         <i data-lucide="play-circle" aria-hidden="true"></i>
                         Take a Tour
                     </button>
@@ -398,42 +377,18 @@
         <!-- Stats Section -->
         <section class="stats" id="stats">
             <div class="section-header">
-                <h2>Our Impact in Numbers</h2>
-                <p>Join thousands of healthcare providers and patients who trust HealthConnect</p>
+                <h2>Live from this hospital</h2>
+                <p>These numbers are read from the MediChain database when the page loads</p>
             </div>
-            
             <div class="stats-grid">
-                <div class="stat-card">
-                    <div class="stat-icon-lg">
-                        <i data-lucide="heart-pulse" aria-hidden="true"></i>
-                    </div>
-                    <div class="stat-number" data-target="487362">0</div>
-                    <div class="stat-label">Active Patients</div>
-                </div>
-                
-                <div class="stat-card">
-                    <div class="stat-icon-lg">
-                        <i data-lucide="stethoscope" aria-hidden="true"></i>
-                    </div>
-                    <div class="stat-number" data-target="12847">0</div>
-                    <div class="stat-label">Healthcare Providers</div>
-                </div>
-                
-                <div class="stat-card">
-                    <div class="stat-icon-lg">
-                        <i data-lucide="timer" aria-hidden="true"></i>
-                    </div>
-                    <div class="stat-number" data-target="4.2">0</div>
-                    <div class="stat-label">Avg. Response Time (hours)</div>
-                </div>
-                
-                <div class="stat-card">
-                    <div class="stat-icon-lg">
-                        <i data-lucide="line-chart" aria-hidden="true"></i>
-                    </div>
-                    <div class="stat-number" data-target="94.7">0</div>
-                    <div class="stat-label">Patient Satisfaction Rate</div>
-                </div>
+                <div class="stat-card"><div class="stat-icon-lg"><i data-lucide="heart-pulse" aria-hidden="true"></i></div>
+                    <div class="stat-number" data-stat="patients">–</div><div class="stat-label">Registered patients</div></div>
+                <div class="stat-card"><div class="stat-icon-lg"><i data-lucide="stethoscope" aria-hidden="true"></i></div>
+                    <div class="stat-number" data-stat="doctors">–</div><div class="stat-label">Verified doctors</div></div>
+                <div class="stat-card"><div class="stat-icon-lg"><i data-lucide="calendar-check" aria-hidden="true"></i></div>
+                    <div class="stat-number" data-stat="appointmentsCompleted">–</div><div class="stat-label">Completed consultations</div></div>
+                <div class="stat-card"><div class="stat-icon-lg"><i data-lucide="link" aria-hidden="true"></i></div>
+                    <div class="stat-number" data-stat="ledgerBlocks">–</div><div class="stat-label">Ledger blocks anchoring records</div></div>
             </div>
         </section>
 
@@ -441,7 +396,7 @@
         <section class="how-it-works" id="how-it-works">
             <div class="section-header">
                 <h2>Simple Steps to Connected Care</h2>
-                <p>Get started with HealthConnect in three easy steps</p>
+                <p>Get started with MediChain in three easy steps</p>
             </div>
             
             <div class="how-it-works-container" style="position: relative;">
@@ -454,7 +409,7 @@
                     <div class="step-content">
                         <div class="step-number">01</div>
                         <h3>Register & Connect</h3>
-                        <p>Create your secure HealthConnect profile in minutes. Link your existing providers and health devices to build a comprehensive view of your health.</p>
+                        <p>Create your secure MediChain profile in minutes. Link your existing providers and health devices to build a comprehensive view of your health.</p>
                     </div>
                     <div class="step-visual">
                         <div class="browser-window">
@@ -549,7 +504,7 @@
         <section class="features" id="features">
             <div class="section-header">
                 <h2>A Platform for Everyone</h2>
-                <p>HealthConnect provides tailored experiences for every member of the healthcare ecosystem</p>
+                <p>MediChain provides tailored experiences for every member of the healthcare ecosystem</p>
             </div>
             
             <div class="features-grid">
@@ -607,7 +562,7 @@
         <section class="use-cases" id="use-cases">
             <div class="section-header">
                 <h2>Tailored for Your Role</h2>
-                <p>Discover how HealthConnect serves your specific needs</p>
+                <p>Discover how MediChain serves your specific needs</p>
             </div>
             
             <div class="use-cases-container">
@@ -797,73 +752,20 @@
         </section>
 
         <!-- Trusted By Section -->
-        <section class="trusted-by">
-            <h3 style="color: var(--text-tertiary); font-weight: 600; letter-spacing: 1px; margin-bottom: 2.5rem; font-size: 1rem; text-transform: uppercase;">Integrates Seamlessly with Leading Health Platforms</h3>
-            <div class="compliance-badges">
-                <img src="https://upload.wikimedia.org/wikipedia/commons/c/c7/Epic_Systems_logo.svg" alt="Epic Systems EHR platform" loading="lazy" onerror="this.style.display='none'" rel="noopener">
-                <img src="https://upload.wikimedia.org/wikipedia/commons/5/58/Cerner_logo.svg" alt="Cerner healthcare technology" loading="lazy" onerror="this.style.display='none'" rel="noopener">
-                <img src="https://upload.wikimedia.org/wikipedia/commons/9/91/Quest_Diagnostics_logo.svg" alt="Quest Diagnostics laboratory services" loading="lazy" onerror="this.style.display='none'" rel="noopener">
-                <img src="https://upload.wikimedia.org/wikipedia/commons/9/95/Labcorp_logo.svg" alt="LabCorp medical laboratory" loading="lazy" onerror="this.style.display='none'" rel="noopener">
-            </div>
-        </section>
-
-        <!-- Testimonials Section -->
-        <section class="testimonials" id="testimonials">
-            <div class="section-header">
-                <h2>What Our Users Say</h2>
-                <p>Hear from patients and providers who use HealthConnect every day</p>
-            </div>
-            
-            <div class="testimonials-grid">
-                <div class="card testimonial-card">
-                    <div class="testimonial-quote">
-                        <i data-lucide="quote" aria-hidden="true"></i>
-                    </div>
-                    <p class="testimonial-text">"After my husband's stroke, coordinating care between his neurologist, physical therapist, and primary care was overwhelming. HealthConnect finally let me see all his appointments, medication changes, and therapy notes in one place. When his PT adjusted his exercises, I could immediately share that with his doctor—something that would have taken weeks of phone tag before."</p>
-                    <div class="testimonial-author">
-                        <div class="author-avatar">
-                            <i data-lucide="user-round" aria-hidden="true"></i>
-                        </div>
-                        <div class="author-info">
-                            <h4>Maria Chen</h4>
-                            <p>Family Caregiver, San Francisco</p>
-                        </div>
-                    </div>
-                </div>
-                
-                <div class="card testimonial-card">
-                    <div class="testimonial-quote">
-                        <i data-lucide="quote" aria-hidden="true"></i>
-                    </div>
-                    <p class="testimonial-text">"I was spending 90 minutes daily on prior authorizations and insurance verifications. HealthConnect's real-time eligibility checks cut that to under 20 minutes. Last month alone, we processed 340 authorizations with a 97% first-pass approval rate. My staff can finally focus on patient care instead of paperwork, and our no-show rate dropped by 23% thanks to the automated appointment reminders."</p>
-                    <div class="testimonial-author">
-                        <div class="author-avatar">
-                            <i data-lucide="user-round" aria-hidden="true"></i>
-                        </div>
-                        <div class="author-info">
-                            <h4>Dr. James Okonkwo</h4>
-                            <p>Family Medicine, Atlanta</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <!-- FAQ Section -->
         <section class="faq" id="faq">
             <div class="section-header">
                 <h2>Frequently Asked Questions</h2>
-                <p>Find answers to common questions about HealthConnect</p>
+                <p>Find answers to common questions about MediChain</p>
             </div>
             
             <div class="faq-container">
                 <div class="faq-item">
                     <button class="faq-question" aria-expanded="false">
-                        <span>Is HealthConnect HIPAA compliant?</span>
+                        <span>Is MediChain HIPAA compliant?</span>
                         <i data-lucide="chevron-down" class="faq-icon" aria-hidden="true"></i>
                     </button>
                     <div class="faq-answer">
-                        <p>Yes, HealthConnect is fully HIPAA compliant. We employ end-to-end encryption, secure data storage, and strict access controls to ensure all protected health information (PHI) is handled in accordance with HIPAA regulations. Our platform undergoes regular security audits and maintains comprehensive documentation for compliance verification.</p>
+                        <p>Yes, MediChain is fully HIPAA compliant. We employ end-to-end encryption, secure data storage, and strict access controls to ensure all protected health information (PHI) is handled in accordance with HIPAA regulations. Our platform undergoes regular security audits and maintains comprehensive documentation for compliance verification.</p>
                     </div>
                 </div>
                 
@@ -873,7 +775,7 @@
                         <i data-lucide="chevron-down" class="faq-icon" aria-hidden="true"></i>
                     </button>
                     <div class="faq-answer">
-                        <p>HealthConnect integrates with all major EHR systems including Epic, Cerner, Allscripts, and athenahealth. Our flexible API allows for seamless data exchange regardless of your current system. We also support HL7 FHIR standards for interoperability with emerging healthcare technologies.</p>
+                        <p>MediChain integrates with all major EHR systems including Epic, Cerner, Allscripts, and athenahealth. Our flexible API allows for seamless data exchange regardless of your current system. We also support HL7 FHIR standards for interoperability with emerging healthcare technologies.</p>
                     </div>
                 </div>
                 
@@ -902,8 +804,8 @@
         <!-- CTA Section -->
         <section class="cta">
             <h2>Ready to Transform Your Healthcare Experience?</h2>
-            <p>Join thousands of healthcare providers and patients who trust HealthConnect with their medical data and workflows.</p>
-            <button class="btn-primary" id="getStartedBtn" aria-label="Get started with HealthConnect today">Get Started Today</button>
+            <p>Join thousands of healthcare providers and patients who trust MediChain with their medical data and workflows.</p>
+            <button class="btn-primary" id="getStartedBtn" aria-label="Get started with MediChain today">Get Started Today</button>
         </section>
     </main>
 
@@ -911,7 +813,7 @@
     <footer class="footer" role="contentinfo">
         <div class="footer-content">
             <div class="footer-column">
-                <h3>HealthConnect</h3>
+                <h3>MediChain</h3>
                 <p style="color: var(--text-tertiary); margin-bottom: 1.5rem;">Connecting care, empowering health through innovative technology solutions.</p>
                 <div class="social-links">
                     <a href="#" class="social-link" aria-label="Twitter" rel="noopener"><i data-lucide="twitter" aria-hidden="true"></i></a>
@@ -953,7 +855,7 @@
         </div>
         
         <div class="footer-bottom">
-            <div class="copyright" id="copyright-year">© 2025 HealthConnect. All rights reserved.</div>
+            <div class="copyright" id="copyright-year">© 2025 MediChain. All rights reserved.</div>
             <div>
                 <a href="#" style="color: var(--text-tertiary); text-decoration: none; margin-right: 1.5rem;">Privacy Policy</a>
                 <a href="#" style="color: var(--text-tertiary); text-decoration: none;">Terms of Service</a>
@@ -981,62 +883,8 @@
         </a>
     </nav>
 
-    <!-- Lead Capture Modal -->
-    <div class="modal-overlay" id="leadModal">
-        <div class="modal-container">
-            <div class="modal-header">
-                <h2>Request a Demo</h2>
-                <button class="modal-close" id="modalClose" aria-label="Close modal">
-                    <i data-lucide="x" aria-hidden="true"></i>
-                </button>
-            </div>
-            <div class="modal-body">
-                <form id="leadForm" action="#" method="POST">
-                    <div class="form-group">
-                        <label for="fullName">Full Name <span aria-label="required">*</span></label>
-                        <input type="text" id="fullName" name="fullName" class="form-control" required>
-                    </div>
-                    <div class="form-group">
-                        <label for="workEmail">Work Email <span aria-label="required">*</span></label>
-                        <input type="email" id="workEmail" name="workEmail" class="form-control" required>
-                    </div>
-                    <div class="form-group">
-                        <label for="companyName">Company Name <span aria-label="required">*</span></label>
-                        <input type="text" id="companyName" name="companyName" class="form-control" required>
-                    </div>
-                    <div class="form-group">
-                        <label for="role">Role <span aria-label="required">*</span></label>
-                        <select id="role" name="role" class="form-control" required>
-                            <option value="">Select your role</option>
-                            <option value="patient">Patient</option>
-                            <option value="provider">Healthcare Provider</option>
-                            <option value="insurance">Insurance Professional</option>
-                            <option value="administrator">Administrator</option>
-                        </select>
-                    </div>
-                    <div class="form-group dont-show-again" style="display: none;">
-                        <label class="checkbox-label">
-                            <input type="checkbox" id="dontShowAgain">
-                            <span>Don't show this again</span>
-                        </label>
-                    </div>
-                    <button type="submit" class="btn-primary" style="width: 100%;" disabled>Request Demo</button>
-                </form>
-                
-                <div class="success-message" id="successMessage">
-                    <div class="success-icon">
-                        <i data-lucide="check" aria-hidden="true"></i>
-                    </div>
-                    <h3>Thank You!</h3>
-                    <p>We've received your request and will contact you within 24 hours to schedule your demo.</p>
-                    <button class="btn-primary" id="closeSuccessBtn">Close</button>
-                </div>
-            </div>
-        </div>
-    </div>
-
     <!-- Icon System Modernization - Lucide Icons -->
-    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+    <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
     
     <!-- Driver.js for Product Tour -->
     <script src="https://cdn.jsdelivr.net/npm/driver.js@1.0.1/dist/driver.min.js"></script>

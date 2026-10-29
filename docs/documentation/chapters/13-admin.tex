@@ -1,0 +1,157 @@
+%% =====================================================================
+\chapter{Administration, Notifications and Settings}\label{ch:admin}
+
+\textbf{Files.} \file{src\codesl{}modules\codesl{}admin\codesl{}admin\codedot{}routes\codedot{}js},
+\file{src\codesl{}services\codesl{}notificationService\codedot{}js},
+\file{src\codesl{}modules\codesl{}notifications\codesl{}notifications\codedot{}routes\codedot{}js},
+\file{src\codesl{}models\codesl{}HospitalSettings\codedot{}js}. Every admin route is behind
+\code{router.use(authenticate, requireRole('admin'))}.
+
+\section{Credential verification}
+
+Doctors and insurance agents who register themselves start \emph{pending}.
+\code{GET \codesl{}api\codesl{}admin\codesl{}doctors\codesl{}pending-verification} lists them (with licence
+number or company), and the admin decides:
+
+\begin{lstlisting}[language=JavaScript,caption={Approving or rejecting (\file{admin.routes.js})}]
+  const user = await User.findOne({ _id: req.params.id, role: { $in: User.ROLES_NEEDING_APPROVAL } });
+  if (!user) throw notFound('Account not found');
+  if (user.approvalStatus !== 'pending') throw conflict(`This account is already ${user.approvalStatus}`, 'ALREADY_DECIDED');
+
+  const approved = req.body.decision === 'approve';
+  user.approvalStatus = approved ? 'approved' : 'rejected';
+  user.approvalNote = req.body.note;
+  await user.save();
+  await invalidateSession(user._id); // the new status applies on their next request
+  await ledgerService.append({
+    chain: 'records', entityType: 'user', entityId: user._id, action: approved ? 'CREDENTIALS_VERIFIED' : 'CREDENTIALS_REJECTED',
+    actorId: req.user.userId, actorRole: 'admin', payload: { approvalStatus: user.approvalStatus, licenseNumber: user.doctorProfile?.licenseNumber },
+  });
+  // ... in-app notification + email to the user
+\end{lstlisting}
+
+The decision takes effect on the doctor's very next request, because the
+session cache is invalidated (Chapter~\ref{ch:zerotrust}); there is no need for
+them to log out. The verification, including which licence number was verified
+and by whom, is permanently recorded in the ledger.
+
+\section{User management}
+
+\begin{itemize}
+  \item \code{GET \codesl{}api\codesl{}admin\codesl{}users?role=\&status=\&q=} searches by name or email
+    and filters by role and active/pending state.
+  \item \code{POST \codesl{}api\codesl{}admin\codesl{}users} creates staff accounts (admin, doctor,
+    agent) that are approved immediately. This is the only way, besides the
+    seed, to create an admin.
+  \item \code{PATCH \codesl{}api\codesl{}admin\codesl{}users\codesl{}:id \{ isActive \}} activates or
+    deactivates. Deactivation revokes every refresh token and invalidates the
+    session cache, so the user is out on their next click. An admin cannot
+    deactivate themselves (so the hospital cannot lock itself out by mistake).
+\end{itemize}
+
+\section{Live statistics}
+
+\code{GET \codesl{}api\codesl{}admin\codesl{}stats} computes every number on the admin overview at
+request time, in one round of parallel queries:
+
+\begin{lstlisting}[language=JavaScript,caption={Parallel aggregation (\file{admin.routes.js}, abridged)}]
+  const [usersByRole, pendingVerification, appointmentsToday, appointmentsByStatus, weekly, records, claimsByStatus, revenue,
+    devices, readings24h, activeConsents, ledger, mongoPing, redisPing] = await Promise.all([
+    User.aggregate([{ $group: { _id: '$role', total: { $sum: 1 }, active: { $sum: { $cond: ['$isActive', 1, 0] } } } }]),
+    User.countDocuments({ approvalStatus: 'pending' }),
+    // ... appointments today, by status, per day for 7 days
+    MedicalRecord.countDocuments(),
+    Claim.aggregate([{ $group: { _id: '$status', count: { $sum: 1 }, amount: { $sum: '$amount' } } }]),
+    Bill.aggregate([{ $group: { _id: null, billed: { $sum: '$amount' }, paid: { $sum: '$paidAmount' }, covered: { $sum: '$coveredAmount' } } }]),
+    // ... devices, readings in 24 h, active consents
+    ledgerService.stats(),
+    ping(() => mongoose.connection.db.admin().ping()),
+    ping(() => redisClient.ping()),
+  ]);
+\end{lstlisting}
+
+Because nothing is cached or hardcoded, registering a new user changes the user
+count on the next refresh; an integration test checks exactly that. The
+\code{system} section reports uptime, memory, load and the latency of a MongoDB
+and Redis ping, which is useful during a demo to show the infrastructure is live.
+
+\section{Hospital settings}
+
+One settings document (\code{HospitalSettings.getSingleton()}) holds the
+hospital name and contacts, the booking window, the default consent duration,
+the list of insurers and the departments. The public part is served without
+login by \code{GET \codesl{}api\codesl{}settings\codesl{}public}, so the registration form's insurer and
+department dropdowns come from the database too. Saving settings is a ledger
+entry.
+
+\section{Access audit}
+
+\code{GET \codesl{}api\codesl{}admin\codesl{}audit} reads the \code{access} chain newest first, filtered
+by decision (allow/deny) or reason, with the actor's name resolved. It also
+returns two counters for the page header: denials in the last 24 hours and the
+total number of break-glass accesses. This is the page an auditor uses to answer
+``who tried to open what, and were they allowed?''.
+
+\section{IoT device registry}
+
+\code{GET\codesl{}POST\codesl{}PATCH \codesl{}api\codesl{}admin\codesl{}devices} lists devices with their patient and
+last-seen time, registers new ones (returning the API key once, Chapter~\ref{ch:rxvitals})
+and activates or deactivates them.
+
+\section{Notifications}
+
+\begin{lstlisting}[language=JavaScript,caption={notify and notifyRole (\file{src/services/notificationService.js})}]
+/**
+ * Creates in-app notifications. Failures are logged and swallowed: a missed
+ * notification must never roll back the clinical or financial action that
+ * caused it.
+ */
+async function notify(userIds, { type = 'info', title, message, page = '' }) {
+  const ids = [].concat(userIds).filter(Boolean).map(String);
+  if (!ids.length) return [];
+  try {
+    return await Notification.insertMany(ids.map((userId) => ({ userId, type, title, message, page })));
+  } catch (error) {
+    logger.error(`Notification failed: ${error.message}`);
+    return [];
+  }
+}
+
+async function notifyRole(role, payload) {
+  const users = await User.find({ role, isActive: true }).select('_id').lean();
+  return notify(users.map((u) => u._id), payload);
+}
+\end{lstlisting}
+
+\begin{howto}
+\code{page} names the dashboard page the notification is about; clicking a
+notification in the browser navigates there. \code{notify} accepts one id or a
+list, so ``tell every doctor with consent'' is one call. Notifications are
+deliberately best-effort, unlike ledger writes: if the ledger write fails, the
+request fails; if a notification fails, it is only logged. The dashboards poll
+\code{GET \codesl{}api\codesl{}notifications} every 20 seconds to update the bell and sidebar
+badges; \code{PATCH \codesl{}:id\codesl{}read} and \code{POST \codesl{}read-all} mark them read.
+\end{howto}
+
+\begin{table}[H]
+\centering\small
+\caption{Who is notified of what}\label{tab:notify}
+\begin{tabularx}{\textwidth}{@{}YP{6cm}@{}}
+\toprule
+\textbf{Event} & \textbf{Recipients} \\
+\midrule
+Doctor/agent registers & All admins \\
+Appointment booked / rescheduled & Doctor \\
+Appointment confirmed, completed, cancelled & Patient (or the other party) \\
+Access requested & Patient \\
+Access granted, approved, denied, revoked & Doctor \\
+Break-glass access & Patient and all admins \\
+New record, prescription or bill & Patient \\
+Refill requested / decided & Doctor / patient \\
+Abnormal vital sign & Patient and every doctor with active consent \\
+Claim filed & Agents of that insurer \\
+Claim status changes & Patient \\
+Account verified / rejected & The user (in-app and email) \\
+\bottomrule
+\end{tabularx}
+\end{table}

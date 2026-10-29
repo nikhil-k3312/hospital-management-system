@@ -1,0 +1,483 @@
+%% =====================================================================
+\chapter{Authentication and Sessions}\label{ch:auth}
+
+This chapter covers who a user is (the \code{User} model), how they prove it
+(password plus emailed OTP), and how the proof is carried between requests
+(access and refresh tokens).
+
+\section{The User model: \file{src\codesl{}models\codesl{}User\codedot{}js}}
+
+One collection holds all four roles. Fields that only make sense for one role
+live in a sub-document (\code{patientProfile}, \code{doctorProfile},
+\code{agentProfile}).
+
+\begin{lstlisting}[language=JavaScript,caption={User schema, key fields (\file{src/models/User.js})}]
+const ROLES = ['patient', 'doctor', 'admin', 'insurance_agent'];
+// Doctors and insurance agents must be approved by an admin before they can
+// touch clinical or financial data. Patients and admins are approved on creation.
+const ROLES_NEEDING_APPROVAL = ['doctor', 'insurance_agent'];
+
+const userSchema = new mongoose.Schema({
+  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+  fullName: { type: String, trim: true, required: true },
+  passwordHash: { type: String, required: true },
+  role: { type: String, enum: ROLES, required: true, default: 'patient' },
+  // ... phone, dateOfBirth, gender, address, patientProfile, doctorProfile, agentProfile
+  approvalStatus: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'approved' },
+  approvalNote: { type: String, default: '' },
+
+  // Identity of this user inside the hash-chain ledger (was `walletAddress`).
+  ledgerAddress: { type: String, index: true },
+
+  isVerified: { type: Boolean, default: false }, // proven control of the email (first OTP login)
+  isActive: { type: Boolean, default: true },
+  lastLogin: { type: Date, default: null },
+  failedLoginAttempts: { type: Number, default: 0 },
+  accountLockedUntil: { type: Date, default: null },
+  refreshTokens: {
+    type: [String],
+    default: [],
+    validate: { validator: (tokens) => tokens.length <= 5, message: 'A user can have at most 5 refresh tokens' },
+  },
+}, { timestamps: true });
+\end{lstlisting}
+
+A doctor's \code{doctorProfile} also holds \code{availability}: working days
+(0 = Sunday), start and end hour, and slot length. Appointments are generated
+from it (Chapter~\ref{ch:appointments}).
+
+\begin{lstlisting}[language=JavaScript,caption={Password hashing and ledger address (\file{src/models/User.js})}]
+userSchema.pre('save', async function hashPasswordAndAssignLedgerAddress(next) {
+  try {
+    if (!this.ledgerAddress) {
+      this.ledgerAddress = `mc_${sha256(this._id.toString()).slice(0, 40)}`;
+    }
+    if (this.isModified('passwordHash')) {
+      const salt = await bcrypt.genSalt(10);
+      this.passwordHash = await bcrypt.hash(this.passwordHash, salt);
+    }
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+\end{lstlisting}
+
+\begin{howto}
+Code that creates or changes a user puts the \emph{plain} password into
+\code{passwordHash}; this hook replaces it with a bcrypt hash before anything is
+written. \code{isModified} ensures an already-hashed password is not hashed
+again on an unrelated save. bcrypt is deliberately slow (cost 10, about 2\textsuperscript{10}
+rounds), so a stolen database cannot be brute-forced quickly. The
+\code{ledgerAddress} is a stable pseudonymous identifier derived from the user
+id, the successor of the paper's blockchain wallet address.
+\end{howto}
+
+\begin{lstlisting}[language=JavaScript,caption={Never leaking secrets in JSON (\file{src/models/User.js})}]
+userSchema.methods.toJSON = function toJSON() {
+  const obj = this.toObject();
+  delete obj.passwordHash;
+  delete obj.failedLoginAttempts;
+  delete obj.accountLockedUntil;
+  delete obj.refreshTokens;
+  delete obj.__v;
+  // Hide the other roles' (empty) profile sections. When a partial populate did
+  // not select `role`, keep whatever profile fields were explicitly selected.
+  if (obj.role) {
+    if (obj.role !== 'patient') delete obj.patientProfile;
+    if (obj.role !== 'doctor') delete obj.doctorProfile;
+    if (obj.role !== 'insurance_agent') delete obj.agentProfile;
+  }
+  return obj;
+};
+\end{lstlisting}
+
+Express calls \code{toJSON} whenever a user is sent with \code{res.json}, so no
+route can accidentally return a password hash. The \code{if (obj.role)} guard
+fixes a real bug found during testing: when an appointment populated only
+\code{doctorProfile.specialization} (without \code{role}), the doctor's profile
+was stripped and the patient dashboard crashed.
+
+\section{Registration}
+
+\begin{lstlisting}[language=JavaScript,caption={register, core (\file{src/modules/auth/auth.controller.js})}]
+async function register(req, res) {
+  const { email, password, fullName, role, phone, dateOfBirth, gender, address } = req.body;
+
+  if (await User.exists({ email })) {
+    throw conflict('An account with this email already exists', 'EMAIL_TAKEN');
+  }
+
+  const needsApproval = User.ROLES_NEEDING_APPROVAL.includes(role);
+  const user = new User({
+    email,
+    fullName,
+    passwordHash: password, // hashed by the pre-save hook
+    role,
+    // ...
+    approvalStatus: needsApproval ? 'pending' : 'approved',
+  });
+  // ... role-specific profile fields
+  await user.save();
+  await ledgerService.append({
+    chain: 'records', entityType: 'user', entityId: user._id, action: 'REGISTER',
+    actorId: user._id, actorRole: role, payload: { email: user.email, role, ledgerAddress: user.ledgerAddress },
+  });
+
+  if (needsApproval) {
+    await notificationService.notifyRole('admin', {
+      type: 'warning',
+      title: 'New account awaiting verification',
+      // ...
+      page: 'verification',
+    });
+  }
+
+  emailService.sendWelcome(email, fullName, role, needsApproval); // fire-and-forget by design
+\end{lstlisting}
+
+\begin{howto}
+The Joi schema on the route only allows \code{role} to be \code{patient},
+\code{doctor} or \code{insurance\_agent}; nobody can register as an admin. Doctors
+must supply a specialization and licence number, agents a company. A doctor or
+agent account starts \code{pending}: they can log in and edit their profile, but
+every clinical or claims endpoint answers 403 \code{APPROVAL\_PENDING} until an
+admin approves them (Section~\ref{sec:policy}). The welcome email is not awaited:
+if the mail server is slow or down, registration still succeeds.
+\end{howto}
+
+\section{Two-step login}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=0.5cm]
+  \node[box,minimum width=3cm] (b1) {Browser};
+  \node[box,minimum width=3cm,right=4.4cm of b1] (a1) {API};
+  \node[box,minimum width=2.4cm,right=3cm of a1] (r1) {Redis};
+  \draw[arr] ([yshift=2mm]b1.east) -- node[lbl,above]{1. email + password} ([yshift=2mm]a1.west);
+  \draw[arr] ([yshift=2mm]a1.east) -- node[lbl,above]{store SHA-256(code)} ([yshift=2mm]r1.west);
+  \node[below=0.2cm of a1,font=\scriptsize] (mail) {code emailed (SMTP)};
+  \node[box,minimum width=3cm,below=1.6cm of b1] (b2) {Browser};
+  \node[box,minimum width=3cm,right=4.4cm of b2] (a2) {API};
+  \node[box,minimum width=2.4cm,right=3cm of a2] (r2) {Redis};
+  \draw[arr] ([yshift=2mm]b2.east) -- node[lbl,above]{2. email + code} ([yshift=2mm]a2.west);
+  \draw[arr] ([yshift=2mm]a2.east) -- node[lbl,above]{compare, delete} ([yshift=2mm]r2.west);
+  \draw[arr] ([yshift=-2mm]a2.west) -- node[lbl,below]{access token + HttpOnly refresh cookie} ([yshift=-2mm]b2.east);
+\end{tikzpicture}
+\caption{Password, then one-time code}\label{fig:login}
+\end{figure}
+
+\subsection{Step 1: \code{POST \codesl{}api\codesl{}auth\codesl{}login\codesl{}request-otp}}
+
+\begin{lstlisting}[language=JavaScript,caption={requestOtp (\file{src/modules/auth/auth.controller.js})}]
+async function requestOtp(req, res) {
+  const { email, password } = req.body;
+  const user = await User.findOne({ email });
+
+  if (!user) throw unauthorized(INVALID_CREDENTIALS, 'INVALID_CREDENTIALS');
+  if (user.isAccountLocked()) {
+    throw forbidden('Account is locked after too many failed attempts. Try again later.', 'ACCOUNT_LOCKED');
+  }
+  if (!user.isActive) throw forbidden('Account is deactivated. Contact the hospital administrator.', 'ACCOUNT_DEACTIVATED');
+
+  if (!(await user.comparePassword(password))) {
+    const failed = await recordFailedAttempt(user);
+    return res.status(401).json({
+      success: false,
+      message: INVALID_CREDENTIALS,
+      code: 'INVALID_CREDENTIALS',
+      attemptsRemaining: Math.max(0, config.security.maxFailedLogins - failed),
+    });
+  }
+
+  if (await otpService.getAttempts(email) >= config.otp.maxAttempts) {
+    throw tooMany('Too many OTP requests. Try again in 15 minutes.');
+  }
+
+  const otp = otpService.generateOTP();
+  await otpService.storeOTP(email, otp);
+  await emailService.sendOTP(email, otp, user.fullName);
+  await otpService.incrementAttempts(email);
+
+  res.json({
+    success: true,
+    message: 'A login code was sent to your email',
+    data: { email, expiresInMinutes: config.otp.expiryMinutes },
+  });
+}
+\end{lstlisting}
+
+\begin{howto}
+\begin{enumerate}
+  \item An unknown email and a wrong password give the same message
+    (\code{INVALID\_CREDENTIALS}), so the form cannot be used to find out who
+    has an account.
+  \item A wrong password increments \code{failedLoginAttempts}; at
+    \code{MAX\_FAILED\_LOGINS} (5) the account is locked for 30 minutes.
+  \item A per-email counter in Redis limits how many codes can be requested.
+  \item \code{sendOTP} is awaited and \emph{throws} on failure: if the email
+    could not be sent the user is told (500), instead of waiting for a code that
+    will never arrive. (A test checks exactly this.)
+\end{enumerate}
+\end{howto}
+
+\begin{lstlisting}[language=JavaScript,caption={Lockout bookkeeping (\file{src/modules/auth/auth.controller.js})}]
+async function recordFailedAttempt(user) {
+  const updated = await User.findByIdAndUpdate(user._id, { $inc: { failedLoginAttempts: 1 } }, { new: true });
+  if (updated.failedLoginAttempts >= config.security.maxFailedLogins) {
+    updated.accountLockedUntil = new Date(Date.now() + config.security.lockMinutes * 60 * 1000);
+    await updated.save({ validateBeforeSave: false });
+    logger.warn(`Account locked after ${updated.failedLoginAttempts} failed attempts: ${user.email}`);
+  }
+  await invalidateSession(user._id); // trust score reflects the failure immediately
+  return updated.failedLoginAttempts;
+}
+\end{lstlisting}
+
+\code{\$inc} is atomic in MongoDB, so two simultaneous wrong guesses are both
+counted. Recent failures also lower the trust score of any session still open
+for that user (Section~\ref{sec:trust}).
+
+\subsection{The OTP service: \file{src\codesl{}services\codesl{}otpService\codedot{}js}}
+
+\begin{lstlisting}[language=JavaScript,caption={Generating, storing and checking codes (\file{src/services/otpService.js})}]
+  /** Only the hash is stored: a Redis dump cannot be used to log in. */
+  hashOTP(otp) {
+    return crypto.createHash('sha256').update(String(otp)).digest('hex');
+  }
+
+  /** Cryptographically secure, uniformly random code with no leading zero. */
+  generateOTP(length = config.otp.length) {
+    return crypto.randomInt(10 ** (length - 1), 10 ** length).toString();
+  }
+
+  /** Stores the hashed code with a TTL; a new request overwrites the old code. */
+  storeOTP(email, otp) {
+    return guard('store', () => redisClient.setEx(otpKey(email), config.otp.expiryMinutes * 60, this.hashOTP(otp)));
+  }
+
+  /** Single use: a matching code is deleted immediately. */
+  verifyOTP(email, otp) {
+    return guard('verify', async () => {
+      const stored = await redisClient.get(otpKey(email));
+      if (!stored) return { success: false, message: 'OTP expired or not found' };
+
+      const expected = Buffer.from(stored, 'hex');
+      const actual = Buffer.from(this.hashOTP(otp), 'hex');
+      // Constant-time comparison: response time does not leak how many characters matched.
+      if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
+        return { success: false, message: 'Invalid OTP' };
+      }
+      await redisClient.del(otpKey(email));
+      return { success: true, message: 'OTP verified successfully' };
+    });
+  }
+\end{lstlisting}
+
+\begin{howto}
+\begin{itemize}
+  \item \code{crypto.randomInt} is a cryptographically secure generator;
+    \code{Math.random} is predictable and must never be used for codes.
+  \item \code{setEx} stores the code with a time-to-live: Redis deletes it after
+    10 minutes without any clean-up job.
+  \item Only the SHA-256 of the code is stored, like a password.
+  \item \code{timingSafeEqual} always takes the same time, so an attacker cannot
+    learn from response timing how close a guess was.
+  \item \code{guard} converts any Redis error into \code{REDIS\_UNAVAILABLE},
+    which becomes a 503: if the OTP store is down, nobody logs in.
+\end{itemize}
+\end{howto}
+
+\subsection{Step 2: \code{POST \codesl{}api\codesl{}auth\codesl{}login\codesl{}verify-otp}}
+
+\begin{lstlisting}[language=JavaScript,caption={verifyOtp, success path (\file{src/modules/auth/auth.controller.js})}]
+  const result = await otpService.verifyOTP(email, otp);
+  if (!result.success) {
+    const otpAttempts = await otpService.incrementAttempts(email);
+    const failed = await recordFailedAttempt(user);
+    return res.status(401).json({ /* ... INVALID_OTP, attemptsRemaining */ });
+  }
+
+  await otpService.clearAttempts(email);
+  user.failedLoginAttempts = 0;
+  user.accountLockedUntil = null;
+  user.lastLogin = new Date();
+  user.isVerified = true;
+  await user.save({ validateBeforeSave: false });
+  await invalidateSession(user._id);
+
+  const access = await issueSession(res, user);
+\end{lstlisting}
+
+A correct code resets the failure counters and marks the account
+\code{isVerified} (the user has proven they control the email address, which
+raises their trust score). \code{issueSession} creates the token pair.
+
+\section{Tokens: \file{src\codesl{}services\codesl{}tokenService\codedot{}js}}
+
+MediChain uses two tokens with different jobs:
+
+\begin{table}[H]
+\centering\small
+\caption{The two tokens}\label{tab:tokens}
+\begin{tabularx}{\textwidth}{@{}P{2.6cm}YY@{}}
+\toprule
+ & \textbf{Access token} & \textbf{Refresh token} \\
+\midrule
+Purpose & Sent with every API call & Gets a new access token \\
+Lifetime & 15 minutes & 7 days \\
+Where the browser keeps it & A JavaScript variable (memory only) & HttpOnly cookie, path \code{\codesl{}api\codesl{}auth} \\
+Signed with & \code{JWT\_SECRET} & \code{JWT\_REFRESH\_SECRET} \\
+Revocation & Blacklist of its \code{jti} in Redis & Valid only while its Redis key exists \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{lstlisting}[language=JavaScript,caption={Issuing tokens (\file{src/services/tokenService.js})}]
+  /** Short-lived access token. The random jti lets us revoke this exact token. */
+  generateAccessToken(user) {
+    const jti = crypto.randomUUID();
+    const token = jwt.sign(
+      { userId: user._id.toString(), email: user.email, role: user.role, jti },
+      this.config.jwt.secret,
+      { expiresIn: this.config.jwt.expiry }
+    );
+    return { token, jti, expiresIn: this.config.jwt.expiry };
+  }
+
+  /**
+   * Long-lived refresh token, signed with a different secret. It is valid only
+   * while its Redis key exists, so the server can revoke it at any time.
+   */
+  async generateRefreshToken(user) {
+    const userId = user._id.toString();
+    const jti = crypto.randomUUID();
+    const token = jwt.sign(
+      { userId, jti, type: 'refresh' },
+      this.config.jwt.refreshSecret,
+      { expiresIn: `${this.config.jwt.refreshExpiryDays}d` }
+    );
+    try {
+      await this.redis.setEx(this.refreshKey(userId, jti), this.refreshTTLSeconds, '1');
+    } catch (error) {
+      logger.error(`Error storing refresh token: ${error.message}`);
+      throw new Error(REDIS_UNAVAILABLE);
+    }
+    return { token, jti, jtiHash: this.hashJTI(jti) };
+  }
+\end{lstlisting}
+
+\begin{lstlisting}[language=JavaScript,caption={The refresh cookie (\file{src/modules/auth/auth.controller.js})}]
+const cookieOptions = () => ({
+  httpOnly: true, // JavaScript in the page cannot read it (XSS)
+  secure: config.isProduction, // HTTPS-only in production; plain http://localhost works in dev
+  sameSite: 'strict', // never sent on cross-site requests (CSRF)
+  path: '/api/auth', // only sent to the auth endpoints that need it
+  maxAge: config.jwt.refreshExpiryDays * 24 * 60 * 60 * 1000,
+});
+\end{lstlisting}
+
+\begin{good}[Why the token is not in localStorage]
+Anything in \code{localStorage} can be read by any script on the page; one XSS
+bug would leak every user's long-lived session. Here the long-lived token is in
+an \code{HttpOnly} cookie that scripts cannot read, and the short-lived access
+token exists only in a variable that disappears when the tab closes. A page
+reload restores the session by calling \code{\codesl{}api\codesl{}auth\codesl{}refresh-token}, which the
+browser authenticates with the cookie automatically.
+\end{good}
+
+\section{Refresh-token rotation}
+
+\begin{lstlisting}[language=JavaScript,caption={refreshToken (\file{src/modules/auth/auth.controller.js})}]
+async function refreshToken(req, res) {
+  const presented = req.cookies?.[REFRESH_COOKIE];
+  if (!presented) throw unauthorized('No session. Please log in.', 'NO_REFRESH_TOKEN');
+
+  let decoded;
+  try {
+    decoded = await tokenService.verifyRefreshToken(presented);
+  } catch (error) {
+    if (error.message === 'REDIS_UNAVAILABLE') throw error;
+    res.clearCookie(REFRESH_COOKIE, { ...cookieOptions(), maxAge: undefined });
+    throw unauthorized('Session expired. Please log in again.', 'INVALID_REFRESH_TOKEN');
+  }
+
+  const user = await User.findById(decoded.userId);
+  if (!user || !user.isActive) {
+    await tokenService.revokeRefreshToken(decoded.userId, decoded.jti);
+    throw unauthorized('Account deactivated', 'ACCOUNT_DEACTIVATED');
+  }
+
+  await tokenService.revokeRefreshToken(decoded.userId, decoded.jti);
+  await User.updateOne({ _id: user._id }, { $pull: { refreshTokens: tokenService.hashJTI(decoded.jti) } });
+  const access = await issueSession(res, user);
+  // ... respond with the new access token and user
+}
+\end{lstlisting}
+
+\begin{howto}
+Each refresh token works \emph{once}. Using it deletes its Redis key and issues
+a new one in a new cookie. If an attacker steals a refresh token and uses it,
+the real user's next refresh fails (its token is gone), so the theft becomes
+visible. If the real user refreshes first, the stolen copy is already dead.
+\code{verifyRefreshToken} also checks \code{type === 'refresh'}, so an access
+token cannot be replayed here.
+\end{howto}
+
+\section{Logout, password change and deactivation}
+
+\begin{lstlisting}[language=JavaScript,caption={Revocation on logout (\file{src/modules/auth/auth.controller.js}) and blacklisting (\file{tokenService.js})}]
+async function logout(req, res) {
+  await tokenService.blacklistAccessToken(req.user);
+  // ... verify and revoke the refresh cookie, clear it
+}
+
+  /** Blacklists an access token until it would have expired anyway. */
+  async blacklistAccessToken(decodedPayload) {
+    if (!decodedPayload?.jti || !decodedPayload?.exp) throw new Error('INVALID_TOKEN');
+    const ttl = decodedPayload.exp - Math.floor(Date.now() / 1000);
+    if (ttl <= 0) return;
+    try {
+      await this.redis.setEx(`jwt:blacklist:${decodedPayload.jti}`, ttl, '1');
+    } catch (error) {
+      // ...
+      throw new Error(REDIS_UNAVAILABLE);
+    }
+  }
+\end{lstlisting}
+
+A JWT is valid until it expires; the server cannot ``un-sign'' it. So logout
+puts the token's id on a blacklist that \code{verifyAccessToken} checks on every
+request. The blacklist entry lives exactly as long as the token would have, so
+the list never grows without bound.
+
+Changing the password calls \code{revokeAllRefreshTokens}, which scans Redis for
+every \code{refresh:<userId>:*} key and deletes them: every other device is signed
+out. Deactivating a user in the admin dashboard does the same, plus
+\code{invalidateSession} so the next request with a still-valid access token is
+refused (Chapter~\ref{ch:zerotrust}).
+
+\begin{warn}[A bug that was fixed]
+The original controller was a class whose methods were passed to Express as
+\code{router.post('\codesl{}logout', authController.logout)}. Express calls them without
+an object, so \code{this} was \code{undefined} and logout always crashed. The
+controller is now a set of plain functions with no \code{this}.
+\end{warn}
+
+\section{Redis key space}\label{sec:redis-keys}
+
+\begin{table}[H]
+\centering\small
+\caption{What lives in Redis}\label{tab:redis}
+\begin{tabularx}{\textwidth}{@{}P{5.2cm}P{2cm}Y@{}}
+\toprule
+\textbf{Key} & \textbf{TTL} & \textbf{Meaning} \\
+\midrule
+\code{otp:<email>} & 10 min & SHA-256 of the current login code \\
+\code{otp:attempts:<email>} & 15 min & OTP requests + wrong codes \\
+\code{refresh:<userId>:<sha256(jti)>} & 7 days & This refresh token is still valid \\
+\code{jwt:blacklist:<jti>} & token's remaining life & This access token was revoked \\
+\code{session:active:<userId>} & 5 min & Cached \code{isActive}, \code{isVerified}, \code{approvalStatus}, failures \\
+\bottomrule
+\end{tabularx}
+\end{table}

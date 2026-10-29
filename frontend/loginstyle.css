@@ -2193,3 +2193,12 @@ body.dark-mode ::-webkit-scrollbar-thumb {
 body.dark-mode ::-webkit-scrollbar-thumb:hover {
     background: var(--accent-secondary);
 }
+/* MediChain: inline form messages and role-specific registration blocks */
+.form-message { display: none; padding: 0.75rem 1rem; border-radius: 10px; margin-bottom: 1rem; font-size: 0.9rem; font-weight: 600;
+    background: #fee2e2; color: #991b1b; border: 1px solid #dc2626; }
+.form-message[data-type="success"] { background: #d1fae5; color: #065f46; border-color: #059669; }
+body.dark-mode .form-message { background: #7f1d1d; color: #fecaca; }
+body.dark-mode .form-message[data-type="success"] { background: #064e3b; color: #a7f3d0; }
+.loading-spinner { vertical-align: middle; }
+.text-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.role-grid { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }

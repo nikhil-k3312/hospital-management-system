@@ -1,0 +1,255 @@
+%% =====================================================================
+\chapter{The Zero-Trust Layer}\label{ch:zerotrust}
+
+``Zero trust'' means: never assume a request is legitimate because of an
+earlier check. MediChain applies four checks to \emph{every} protected request,
+in the middleware in \file{src\codesl{}middleware\codesl{}auth\codedot{}js} and the policy engine in
+\file{src\codesl{}services\codesl{}trustService\codedot{}js}, and records every decision.
+
+\begin{enumerate}
+  \item \textbf{Authentication}: is the token genuine, unexpired and not revoked?
+  \item \textbf{Continuous verification}: is the account still active, and what
+    is its current state?
+  \item \textbf{Trust score}: how much does this particular request look like
+    its legitimate owner?
+  \item \textbf{Authorisation}: does the role, approval status, trust score and
+    (for patient data) consent allow this action?
+\end{enumerate}
+
+\section{\code{authenticate}}
+
+\begin{lstlisting}[language=JavaScript,caption={authenticate (\file{src/middleware/auth.js})}]
+async function authenticate(req, res, next) {
+  const header = req.headers.authorization || '';
+  if (!header.startsWith('Bearer ') || !header.slice(7).trim()) {
+    return deny(req, res, 401, 'missing_token', 'Access denied. No token provided. Please log in.');
+  }
+
+  let decoded;
+  try {
+    decoded = await tokenService.verifyAccessToken(header.slice(7).trim());
+  } catch (error) {
+    if (error.name === 'TokenExpiredError') return deny(req, res, 401, 'token_expired', 'Token expired. Please log in again.');
+    if (error.message === 'TOKEN_REVOKED') return deny(req, res, 401, 'token_revoked', 'Token has been revoked. Please log in again.');
+    if (error.message === 'REDIS_UNAVAILABLE') return deny(req, res, 503, 'redis_unavailable', 'Security service temporarily unavailable. Please try again.');
+    return deny(req, res, 401, 'invalid_token', 'Invalid token. Please log in again.');
+  }
+
+  let sessionState;
+  try {
+    sessionState = await loadSessionState(decoded.userId);
+  } catch (error) {
+    logger.error(`Session state unavailable: ${error.message}`);
+    return deny(req, res, 503, 'session_cache_unavailable', 'Security service temporarily unavailable. Please try again.', { userId: decoded.userId });
+  }
+
+  if (!sessionState || !sessionState.isActive) {
+    return deny(req, res, 401, 'account_deactivated', 'Account deactivated. Contact the hospital administrator.', { userId: decoded.userId });
+  }
+
+  req.user = decoded; // { userId, email, role, jti, iat, exp }
+  req.sessionState = sessionState;
+  req.trustScore = trustService.calculateTrustScore(req, decoded, sessionState);
+
+  if (req.trustScore.score < req.trustScore.minScore) {
+    return deny(req, res, 403, 'low_trust_score', 'Access denied. Additional verification required: please log in again.', {
+      userId: decoded.userId, trustScore: req.trustScore.score, body: { trustScore: req.trustScore.score },
+    });
+  }
+
+  await auditService.recordAccessDecision({ req, userId: decoded.userId, decision: 'allow', reason: 'authenticated', trustScore: req.trustScore.score });
+  return next();
+}
+\end{lstlisting}
+
+\begin{howto}
+Every failure path calls \code{deny}, which writes the decision to the ledger's
+access chain before answering, so failed attempts are as visible as successful
+ones. The reason code (\code{token\_expired}, \code{token\_revoked}, \ldots) is
+returned to the client in upper case; the frontend uses \code{401} to try a
+silent refresh and \code{503} to show ``security service unavailable''.
+\end{howto}
+
+\subsection{Continuous verification with a session cache}
+
+\begin{lstlisting}[language=JavaScript,caption={loadSessionState (\file{src/middleware/auth.js})}]
+async function loadSessionState(userId) {
+  const cached = await redisClient.get(sessionKey(userId));
+  if (cached) return JSON.parse(cached);
+
+  const user = await User.findById(userId).select('isActive isVerified failedLoginAttempts approvalStatus').lean();
+  if (!user) return null;
+  const state = {
+    isActive: user.isActive,
+    isVerified: user.isVerified,
+    failedLoginAttempts: user.failedLoginAttempts || 0,
+    approvalStatus: user.approvalStatus,
+  };
+  await redisClient.setEx(sessionKey(userId), SESSION_CACHE_SECONDS, JSON.stringify(state));
+  return state;
+}
+\end{lstlisting}
+
+A JWT says who the user \emph{was} when it was issued. If an admin deactivates
+the account a minute later, the token is still cryptographically valid for 14
+more minutes. Loading the account state on each request closes that gap. To
+avoid a MongoDB query per request, the state is cached in Redis for 5 minutes,
+and every code path that changes it (deactivation, approval, failed login,
+password change) calls \code{invalidateSession}, so changes take effect on the
+very next request.
+
+\section{The trust score}\label{sec:trust}
+
+\begin{lstlisting}[language=JavaScript,caption={calculateTrustScore (\file{src/services/trustService.js})}]
+  calculateTrustScore(req, tokenPayload, sessionState = {}) {
+    let score = 100;
+    const reasons = [];
+    const failedAttempts = Number(sessionState.failedLoginAttempts || 0);
+    const sessionAgeSeconds = tokenPayload?.iat
+      ? Math.max(0, Math.floor(Date.now() / 1000) - tokenPayload.iat)
+      : null;
+    const userAgent = req.get('user-agent') || '';
+
+    if (!sessionState.isVerified) {
+      score -= 15;
+      reasons.push('user_not_verified');
+    }
+    if (failedAttempts > 0) {
+      score -= Math.min(30, failedAttempts * 6);
+      reasons.push('recent_failed_attempts');
+    }
+    if (!userAgent) {
+      score -= 10;
+      reasons.push('missing_user_agent');
+    }
+    if (sessionAgeSeconds !== null && sessionAgeSeconds > 60 * 60) {
+      score -= 10;
+      reasons.push('older_session');
+    }
+    if (sessionAgeSeconds !== null && sessionAgeSeconds > 6 * 60 * 60) {
+      score -= 15;
+      reasons.push('long_lived_session');
+    }
+    // ... returns { score, reasons, minScore, highSensitivityMinScore, ... }
+\end{lstlisting}
+
+\begin{table}[H]
+\centering\small
+\caption{Trust score signals}\label{tab:trust}
+\begin{tabularx}{\textwidth}{@{}P{4.2cm}P{1.6cm}Y@{}}
+\toprule
+\textbf{Signal} & \textbf{Penalty} & \textbf{Why it matters} \\
+\midrule
+Email never verified by OTP & $-15$ & Weaker proof of identity \\
+Recent failed logins & $-6$ each, max $-30$ & Someone may be guessing this account's password \\
+No User-Agent header & $-10$ & Typical of scripts rather than browsers \\
+Session older than 1 hour & $-10$ & Old credentials are more likely to have leaked \\
+Session older than 6 hours & $-15$ more & As above \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Every request needs at least \code{MIN\_TRUST\_SCORE} (50). Medical records and
+files need \code{HIGH\_SENSITIVITY\_TRUST\_SCORE} (70). Example: a user with two
+recent failed logins ($-12$) whose access token was issued 2 hours ago via
+refresh ($-10$) scores 78: allowed everywhere. With five failures ($-30$) and a
+7-hour-old token ($-25$) the score is 45: every request is refused with
+``please log in again'', and a fresh login (which resets the failures) restores
+access. The profile page shows each user their current score and the reasons.
+
+\section{The policy engine}\label{sec:policy}
+
+\begin{lstlisting}[language=JavaScript,caption={evaluatePolicy (\file{src/services/trustService.js})}]
+  evaluatePolicy(req, allowedRoles, options = {}) {
+    const role = req.user?.role;
+    const trustScore = req.trustScore?.score ?? 0;
+    const minTrustScore = options.minTrustScore ?? config.security.minTrustScore;
+    const breakGlassReason = (req.get('x-break-glass-reason') || '').trim();
+    const breakGlass = Boolean(options.allowBreakGlass && breakGlassReason.length >= 10 && BREAK_GLASS_ROLES.includes(role));
+
+    if (breakGlass) {
+      return { allowed: true, reason: 'break_glass_allowed', breakGlass: true, breakGlassReason };
+    }
+    if (!allowedRoles.includes(role)) {
+      return { allowed: false, status: 403, reason: 'role_denied', message: `Access denied. This resource requires the ${allowedRoles.join(' or ')} role.` };
+    }
+    if (ROLES_NEEDING_APPROVAL.includes(role) && !options.allowUnapproved && req.sessionState?.approvalStatus !== 'approved') {
+      return { allowed: false, status: 403, reason: 'approval_pending', message: 'Your account is awaiting administrator verification.' };
+    }
+    if (options.requireVerified && !req.sessionState?.isVerified) {
+      return { allowed: false, status: 403, reason: 'verification_required', message: 'Access denied. Verified account required.' };
+    }
+    if (trustScore < minTrustScore) {
+      return { allowed: false, status: 403, reason: 'low_trust_score', message: `Access denied. This resource needs a trust score of ${minTrustScore} (yours is ${trustScore}). Log in again to refresh your session.` };
+    }
+    if (options.timeWindow && !this.isWithinTimeWindow(new Date().getHours(), options.timeWindow)) {
+      return { allowed: false, status: 403, reason: 'outside_time_window', message: 'Access denied outside the approved access window.' };
+    }
+    return { allowed: true, reason: 'policy_allowed', breakGlass: false };
+  }
+\end{lstlisting}
+
+\begin{howto}
+Routes declare their policy declaratively:
+\begin{lstlisting}[language=JavaScript]
+const readPolicy = requireRole('patient', 'doctor', {
+  minTrustScore: config.security.highSensitivityTrustScore, allowBreakGlass: true,
+});
+\end{lstlisting}
+\code{requireRole} (in \file{auth\codedot{}js}) calls \code{evaluatePolicy} and either
+continues or calls \code{deny}. The checks run in a fixed order and the first
+failure wins: role (RBAC), then approval, verification, trust score and time
+window (attribute-based conditions, ABAC). The result is stored in
+\code{req.policy} so the handler knows whether break-glass was used.
+\end{howto}
+
+\section{Break-glass emergency access}
+
+An unconscious patient in the emergency room cannot approve a consent request.
+Break-glass lets a doctor (or admin) open the record anyway, under three
+conditions: the route must allow it (\code{allowBreakGlass}), the user must be a
+doctor or admin, and the request must carry a reason of at least 10 characters
+in the \code{x-break-glass-reason} header. Break-glass replaces the
+\emph{consent} check only; the user must still be authenticated.
+
+What happens next is in \code{consentService.assertCanAccessPatient}
+(Chapter~\ref{ch:records}): the access is written to the records chain as
+\code{BREAK\_GLASS\_ACCESS} with the reason, the patient gets a ``danger''
+notification quoting the reason, and every admin is notified to review it.
+Emergency access is therefore possible, but never silent.
+
+\section{The audit trail: \file{src\codesl{}services\codesl{}auditService\codedot{}js}}
+
+\begin{lstlisting}[language=JavaScript,caption={recordAccessDecision (\file{src/services/auditService.js})}]
+async function recordAccessDecision({ req, userId, decision, reason, trustScore, breakGlassReason, resource }) {
+  try {
+    await ledgerService.append({
+      chain: 'access',
+      entityType: 'access_decision',
+      entityId: resource || `${req.method} ${req.originalUrl || req.path}`,
+      action: decision === 'allow' ? 'ALLOW' : 'DENY',
+      actorId: userId || req.user?.userId || null,
+      actorRole: req.user?.role || null,
+      meta: {
+        reason,
+        method: req.method,
+        path: (req.originalUrl || req.path || '').split('?')[0],
+        ip: req.ip,
+        userAgentHash: sha256(req.get('user-agent') || ''),
+        trustScore: trustScore ?? req.trustScore?.score ?? null,
+        breakGlassReason: breakGlassReason || undefined,
+      },
+    });
+  } catch (error) {
+    logger.error(`Audit write failed: ${error.message}`);
+  }
+}
+\end{lstlisting}
+
+Each decision becomes one block of the \code{access} chain, so the audit log is
+itself tamper-evident. The query string is dropped from the path and the
+User-Agent is stored only as a hash, to avoid putting personal data in a log
+that can never be edited. Audit failures are logged but do not fail the request:
+losing one audit line is better than locking every user out. The admin
+dashboard's \emph{Access Control} page reads this chain through
+\code{GET \codesl{}api\codesl{}admin\codesl{}audit}.

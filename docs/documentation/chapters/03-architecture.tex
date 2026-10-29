@@ -1,0 +1,157 @@
+%% =====================================================================
+\chapter{Architecture}\label{ch:architecture}
+
+\section{The big picture}
+
+MediChain is a classic three-tier web application with one important addition:
+the ledger, which lives in the same database but is written only by one service
+and is never updated or deleted.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=1.2cm and 1.5cm]
+  \node[box,minimum width=3.2cm] (browser) {Browser\\\scriptsize homepage, login,\\\scriptsize 4 role dashboards};
+  \node[box,minimum width=3.2cm,right=2.2cm of browser] (api) {Express API\\\scriptsize \code{backend\codesl{}services\codesl{}api}};
+  \node[box,minimum width=3.0cm,above=0.9cm of api] (iot) {IoT devices\\\scriptsize (or simulator)};
+  \node[store,below left=1.6cm and 0.2cm of api] (mongo) {MongoDB\\\scriptsize data, GridFS,\\\scriptsize ledger};
+  \node[store,below right=1.6cm and 0.2cm of api] (redis) {Redis\\\scriptsize OTP, tokens,\\\scriptsize sessions};
+  \node[box,minimum width=2.6cm,right=1.6cm of api] (smtp) {Gmail SMTP\\\scriptsize OTP \& notices};
+  \draw[arr] (browser) -- node[lbl,above]{HTTPS, JSON} node[lbl,below]{same origin} (api);
+  \draw[arr] (api) -- node[lbl,below]{static files} ([yshift=-3mm]browser.east);
+  \draw[arr] (iot) -- node[lbl,right]{\code{x-device-key}} (api);
+  \draw[arr] (api) -- (mongo);
+  \draw[arr] (api) -- (redis);
+  \draw[arr] (api) -- (smtp);
+\end{tikzpicture}
+\caption{System context}\label{fig:context}
+\end{figure}
+
+\begin{itemize}
+  \item \textbf{Browser.} Plain HTML, CSS and JavaScript, served by the API
+    itself. Being on the same origin lets the refresh-token cookie be
+    \code{SameSite=Strict} and removes the need for CORS in the browser.
+  \item \textbf{API.} One Node.js/Express service. It is split internally into
+    modules (auth, appointments, records, \ldots) that share middleware and
+    services.
+  \item \textbf{MongoDB} stores all business data, uploaded files (GridFS) and
+    the ledger (\code{ledgerentries} collection).
+  \item \textbf{Redis} stores short-lived security state: hashed OTPs, refresh
+    token ids, the access-token blacklist, cached session state and attempt
+    counters. Everything in Redis expires on its own.
+  \item \textbf{SMTP} (Gmail) delivers OTP codes, welcome and verification emails.
+  \item \textbf{IoT devices} post readings with their own API key; they never
+    hold a user session.
+\end{itemize}
+
+\section{Inside the API}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=0.55cm]
+  \node[box,minimum width=11cm,text width=10.6cm] (mw) {Global middleware: helmet (CSP) $\cdot$ CORS $\cdot$ JSON parser $\cdot$ rate limits $\cdot$ request log};
+  \node[box,minimum width=11cm,text width=10.6cm,below=of mw] (auth) {Per-route: \code{authenticate} (JWT + trust score) $\to$ \code{requireRole} (RBAC + ABAC) $\to$ \code{validate} (Joi)};
+  \node[box,minimum width=11cm,text width=10.6cm,below=of auth] (mod) {Modules: auth $\cdot$ users $\cdot$ appointments $\cdot$ consents $\cdot$ records/files $\cdot$ prescriptions $\cdot$ vitals $\cdot$ billing $\cdot$ claims $\cdot$ notifications $\cdot$ admin $\cdot$ ledger};
+  \node[box,minimum width=11cm,text width=10.6cm,below=of mod] (svc) {Services: ledgerService $\cdot$ auditService $\cdot$ consentService $\cdot$ trustService $\cdot$ tokenService $\cdot$ otpService $\cdot$ emailService $\cdot$ notificationService};
+  \node[box,minimum width=11cm,text width=10.6cm,below=of svc] (mdl) {Mongoose models (12) $\cdot$ Redis client $\cdot$ GridFS bucket};
+  \node[box,minimum width=11cm,text width=10.6cm,below=of mdl,draw=badred,fill=red!3] (err) {Central error handler: every failure becomes \code{\{ success:false, message, code \}}};
+  \foreach \a/\b in {mw/auth,auth/mod,mod/svc,svc/mdl,mdl/err} \draw[arr] (\a) -- (\b);
+\end{tikzpicture}
+\caption{Layers inside the API}\label{fig:layers}
+\end{figure}
+
+The rule that keeps this maintainable: \emph{route handlers do HTTP; services
+do policy}. For example, every module that touches a patient's data calls the
+same \code{consentService.assertCanAccessPatient}, and every module that changes
+protected data calls the same \code{ledgerService.recordEvent}. There is exactly
+one implementation of ``may this doctor see this patient?'' and one of ``write a
+ledger entry''.
+
+\section{Technology stack and why}
+
+\begin{table}[H]
+\centering\small
+\caption{Technology choices}\label{tab:stack}
+\begin{tabularx}{\textwidth}{@{}P{3cm}P{3.4cm}Y@{}}
+\toprule
+\textbf{Concern} & \textbf{Choice} & \textbf{Why} \\
+\midrule
+Runtime / framework & Node.js 18+, Express 4 & Already used by the original auth service; small and well understood. \\
+Database & MongoDB + Mongoose 8 & Already in the repo. Flexible documents suit per-role profiles; unique and partial indexes give real integrity guarantees. \\
+Files & GridFS & Lives in the same MongoDB, no extra service; streams large files. \\
+Security state & Redis 4 client & TTL on every key: OTPs and blacklist entries clean themselves up. \\
+Auth & bcryptjs, jsonwebtoken & Standard password hashing and signed tokens. \\
+Validation & Joi 17 & Declarative schemas, all errors reported at once. \\
+HTTP hardening & helmet, express-rate-limit, cors & CSP and security headers, brute-force limits. \\
+Uploads & multer 2 & Multipart parsing with type and size limits. \\
+Email & Nodemailer 6 & SMTP (Gmail) in production; console and in-memory transports for development and tests. \\
+Logging & winston 3 & Console plus rotating files in \file{backend\codesl{}logs} (git-ignored). \\
+Frontend & Vanilla JS, Chart.js 4.4.1, Lucide 0.460.0 & No build step; the existing pages were kept (D4). \\
+Tests & Jest 29, Supertest 7, jsdom, Testing Library & Real HTTP requests against real Mongo and Redis. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Architecture decisions}\label{sec:decisions}
+
+\code{PLAN.md} \S3 locked six decisions before any feature code was written.
+Their outcomes:
+
+\begin{description}[style=nextline,leftmargin=1cm]
+  \item[D1 -- One database.] MongoDB for everything; no PostgreSQL. A second
+    database would add risk with no user-facing benefit at this scale.
+  \item[D2 -- Hash chain instead of Hyperledger Fabric.] Fabric needs a network
+    of certificate authorities, peers and an orderer, plus chaincode lifecycle
+    management: a project in itself. The paper's actual requirement is
+    \emph{immutable, tamper-evident and auditable}. A hash chain meets that inside
+    the existing database (Chapter~\ref{ch:ledger} shows how).
+  \item[D3 -- GridFS instead of IPFS.] The pattern from the paper is kept:
+    the file lives in storage, its SHA-256 lives in the ledger. Only the storage
+    backend differs.
+  \item[D4 -- Keep the vanilla frontend.] The existing HTML/CSS was substantial,
+    so it was wired to the API instead of rewritten in React. Shared state that
+    Redux would have held lives in two small modules (\file{js\codesl{}api\codedot{}js},
+    \file{js\codesl{}portal\codedot{}js}).
+  \item[D5 -- Redis has a defined job.] OTPs, refresh tokens, revocation,
+    session cache and attempt counters. Nothing else.
+  \item[D6 -- Trust score is a real feature.] The \code{MIN\_TRUST\_SCORE} and
+    \code{HIGH\_SENSITIVITY\_TRUST\_SCORE} settings were found to belong to a
+    documented zero-trust design. They are now enforced on every request
+    (Chapter~\ref{ch:zerotrust}).
+\end{description}
+
+\section{Why a hash chain is enough}
+
+A blockchain such as Fabric solves two problems: \emph{tamper evidence} (you can
+tell if history was changed) and \emph{decentralised trust} (no single party can
+change history, because many independent parties hold copies). MediChain is run
+by one hospital, so the second problem does not arise in the same form: there is
+no group of mutually distrusting organisations. The first problem is exactly what
+a hash chain solves. Section~\ref{sec:ledger-limits} discusses the remaining gap
+(an attacker who can rewrite the \emph{whole} chain) and how to close it by
+publishing the chain's head hash externally.
+
+\section{Repository layout}
+
+\begin{lstlisting}[style=shell,caption={Repository layout}]
+backend/services/api/
+  src/
+    app.js, server.js        Express app and process start-up
+    config/config.js          environment -> config object, validation
+    db/                       mongo.js (connection, GridFS), redis.js
+    middleware/               auth.js, validate.js, errorHandler.js
+    models/                   12 Mongoose models
+    services/                 ledger, audit, consent, trust, token, otp, email, notification
+    modules/<area>/           route files (and helpers) per feature area
+    utils/                    errors.js, hash.js, logger.js
+  scripts/                    seed, IoT simulator, tamper demo, ledger verifier
+  tests/                      unit/ and integration/ (Jest + Supertest)
+frontend/
+  homepage.html, login.html   public pages
+  patient.html, doctor.html, admin.html, insurance.html
+  css/portal.css              shared dashboard styles
+  js/api.js, ui.js, portal.js shared client code
+  js/patient.js, doctor.js, admin.js, insurance.js
+  tests/                      Jest + jsdom tests
+docs/                         this document, DEMO.md, zero-trust notes
+Dockerfile, docker-compose.yml, .github/workflows/ci.yml
+\end{lstlisting}

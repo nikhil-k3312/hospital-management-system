@@ -1,0 +1,293 @@
+%% =====================================================================
+\chapter{Medical Records, Consent and Files}\label{ch:records}
+
+This is the heart of the system: who may see a patient's medical data, how
+records are written and amended, and how attached files are stored and proven
+unchanged.
+
+\section{Consent model}
+
+A patient's consent is an \code{AccessGrant} document linking one patient and
+one doctor, with a status and an expiry date.
+
+\begin{lstlisting}[language=JavaScript,caption={AccessGrant (\file{src/models/AccessGrant.js})}]
+const accessGrantSchema = new mongoose.Schema({
+  patientId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  doctorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  status: { type: String, enum: ['requested', 'active', 'denied', 'revoked'], default: 'requested' },
+  purpose: { type: String, trim: true, default: '' },
+  requestedBy: { type: String, enum: ['doctor', 'patient'], required: true },
+  grantedAt: { type: Date, default: null },
+  expiresAt: { type: Date, default: null },
+  revokedAt: { type: Date, default: null },
+  ledgerEntryId: { type: String, default: null },
+}, { timestamps: true });
+
+/** The status the user sees: an active grant past its expiry shows as "expired". */
+accessGrantSchema.methods.effectiveStatus = function effectiveStatus(now = new Date()) {
+  if (this.status === 'active' && (!this.expiresAt || this.expiresAt <= now)) return 'expired';
+  return this.status;
+};
+\end{lstlisting}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=0.9cm and 2.7cm]
+  \node[box] (r) {requested};
+  \node[box,right=of r,draw=okgreen,fill=green!6] (a) {active\\\scriptsize until expiresAt};
+  \node[box,below=of r,draw=badred,fill=red!3] (d) {denied};
+  \node[box,right=of a,draw=badred,fill=red!3] (v) {revoked};
+  \node[box,below=of a,dashedbox] (e) {expired\\\scriptsize (computed)};
+  \node[left=0.7cm of r,font=\small] (start) {doctor asks};
+  \draw[arr] (start) -- (r);
+  \draw[arr] (r) -- node[lbl,above]{patient approves} (a);
+  \draw[arr] (r) -- node[lbl,left]{patient denies} (d);
+  \draw[arr] (a) -- node[lbl,above]{patient revokes} (v);
+  \draw[arr,dashed] (a) -- node[lbl,right]{time passes} (e);
+  \node[above=0.6cm of a,font=\small] (g) {patient grants directly};
+  \draw[arr] (g) -- (a);
+\end{tikzpicture}
+\caption{Consent lifecycle}\label{fig:consent}
+\end{figure}
+
+\begin{howto}
+``Expired'' is never written to the database: it is computed from
+\code{expiresAt} every time. That way a grant expires at exactly the right
+moment, with no background job. Every transition (\code{REQUEST\_ACCESS},
+\code{GRANT\_ACCESS}, \code{APPROVE}, \code{DENY}, \code{REVOKE}) is a ledger
+entry, and the other party is notified.
+\end{howto}
+
+\begin{lstlisting}[language=JavaScript,caption={A patient grants access directly (\file{src/modules/consents/consents.routes.js})}]
+    const settings = await HospitalSettings.getSingleton();
+    const days = req.body.durationDays || settings.defaultConsentDays;
+
+    // Replace any pending request or existing active grant with this one.
+    await AccessGrant.updateMany(
+      { patientId: req.user.userId, doctorId: doctor._id, status: { $in: ['requested', 'active'] } },
+      { $set: { status: 'revoked', revokedAt: new Date() } }
+    );
+    const now = new Date();
+    const grant = await AccessGrant.create({
+      patientId: req.user.userId, doctorId: doctor._id, status: 'active', purpose: req.body.purpose,
+      requestedBy: 'patient', grantedAt: now, expiresAt: new Date(now.getTime() + days * 86400000),
+    });
+    await ledger(grant, 'GRANT_ACCESS', req);
+\end{lstlisting}
+
+\section{The consent gate: \file{src\codesl{}services\codesl{}consentService\codedot{}js}}
+
+Every module that returns patient data (records, files, vitals,
+prescriptions) calls one function:
+
+\begin{lstlisting}[language=JavaScript,caption={assertCanAccessPatient (\file{src/services/consentService.js})}]
+async function hasActiveGrant(doctorId, patientId, now = new Date()) {
+  const grant = await AccessGrant.exists({
+    doctorId, patientId, status: 'active', expiresAt: { $gt: now },
+  });
+  return Boolean(grant);
+}
+
+async function assertCanAccessPatient(req, patientId, { purpose = 'view medical data' } = {}) {
+  const { userId, role } = req.user;
+  const pid = String(patientId);
+
+  if (role === 'patient') {
+    if (userId === pid) return { via: 'owner' };
+    throw forbidden('Patients can only access their own data.', 'NOT_OWNER');
+  }
+
+  if (role === 'doctor' && await hasActiveGrant(userId, pid)) {
+    return { via: 'consent' };
+  }
+
+  if (req.policy?.breakGlass) {
+    await ledgerService.append({
+      chain: 'records',
+      entityType: 'patient',
+      entityId: pid,
+      action: 'BREAK_GLASS_ACCESS',
+      actorId: userId,
+      actorRole: role,
+      meta: { reason: req.policy.breakGlassReason, purpose, path: req.originalUrl },
+    });
+    await notificationService.notify(pid, {
+      type: 'danger',
+      title: 'Emergency access to your records',
+      message: `A ${role} accessed your records under emergency (break-glass) access. Reason given: "${req.policy.breakGlassReason}". This access is logged in the ledger.`,
+      page: 'permissions',
+    });
+    await notificationService.notifyRole('admin', { /* ... 'Break-glass access used' */ });
+    return { via: 'break_glass' };
+  }
+
+  throw forbidden('No active consent from this patient. Request access, or use emergency access if this is an emergency.', 'CONSENT_REQUIRED');
+}
+\end{lstlisting}
+
+\begin{howto}
+\begin{itemize}
+  \item A patient sees only their own data.
+  \item A doctor needs a grant that is \code{active} \emph{and} not past
+    \code{expiresAt}, checked in the same query.
+  \item Admins run the system but do not treat patients: they have no consent
+    path, only audited break-glass.
+  \item The return value says \emph{how} access was obtained. The records list
+    passes it to the frontend (\code{meta.accessVia}), which shows a red
+    emergency banner when it is \code{break\_glass}.
+\end{itemize}
+\end{howto}
+
+\section{Records: \file{src\codesl{}modules\codesl{}records\codesl{}records\codedot{}routes\codedot{}js}}
+
+\begin{lstlisting}[language=JavaScript,caption={Record policies and creation (\file{records.routes.js})}]
+// Medical data is high-sensitivity: it needs the higher trust bar, and doctors
+// or admins may override consent in an emergency (break-glass, audited).
+const readPolicy = requireRole('patient', 'doctor', {
+  minTrustScore: config.security.highSensitivityTrustScore, allowBreakGlass: true,
+});
+const writePolicy = requireRole('patient', 'doctor', { minTrustScore: config.security.highSensitivityTrustScore });
+// ...
+    if (role === 'patient') {
+      patientId = userId;
+      if (req.body.recordType !== 'patient_upload') throw forbidden('Patients can only add their own uploaded documents');
+    } else {
+      if (!patientId) throw badRequest('patientId is required');
+      if (req.body.recordType === 'patient_upload') throw badRequest('Choose a clinical record type');
+      await consentService.assertCanAccessPatient(req, patientId, { purpose: 'create record' });
+    }
+
+    const record = await MedicalRecord.create({
+      ...req.body,
+      patientId,
+      doctorId: role === 'doctor' ? userId : null,
+    });
+    const entry = await ledgerService.recordEvent({ entityType: 'record', entity: record, action: 'CREATE', actor: req.user });
+    record.ledgerEntryId = entry._id.toString();
+    await record.save();
+\end{lstlisting}
+
+Note that the \emph{write} policy does not allow break-glass: emergency access
+is for reading a history, not for writing records without consent.
+
+\subsection{Amending a record}
+
+\begin{lstlisting}[language=JavaScript,caption={Versioned amendment (\file{records.routes.js})}]
+    const record = await loadRecordWithAccess(req);
+    if (!record.doctorId || record.doctorId.toString() !== req.user.userId) {
+      throw forbidden('Only the doctor who wrote this record can amend it');
+    }
+    Object.assign(record, req.body);
+    record.version += 1;
+    const entry = await ledgerService.recordEvent({
+      entityType: 'record', entity: record, action: 'UPDATE', actor: req.user, meta: { version: record.version },
+    });
+    record.ledgerEntryId = entry._id.toString();
+    await record.save();
+\end{lstlisting}
+
+Records are never edited silently: the version number goes up and a new
+\code{UPDATE} entry, containing the hash of the new content, is chained. The
+ledger history (\code{GET \codesl{}api\codesl{}records\codesl{}:id\codesl{}ledger-history}) therefore shows
+every version, who made it and when, with the actor's name resolved for display.
+
+\section{Files: GridFS with hashes in the ledger}
+
+\begin{lstlisting}[language=JavaScript,caption={Upload limits (\file{records.routes.js})}]
+const ALLOWED_TYPES = ['application/pdf', 'image/png', 'image/jpeg', 'text/plain'];
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: config.files.maxBytes, files: 1 },
+  fileFilter: (req, file, cb) => (ALLOWED_TYPES.includes(file.mimetype)
+    ? cb(null, true)
+    : cb(badRequest('Only PDF, PNG, JPEG and plain-text files are accepted'))),
+});
+\end{lstlisting}
+
+\begin{lstlisting}[language=JavaScript,caption={Storing a file and anchoring its hash (\file{records.routes.js})}]
+    const sha256 = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
+    const fileId = await new Promise((resolve, reject) => {
+      const stream = getBucket().openUploadStream(req.file.originalname, {
+        metadata: { recordId: record._id.toString(), patientId: record.patientId.toString(), sha256, contentType: req.file.mimetype, uploadedBy: req.user.userId },
+      });
+      Readable.from(req.file.buffer).pipe(stream).on('error', reject).on('finish', () => resolve(stream.id.toString()));
+    });
+
+    record.attachments.push({
+      fileId, filename: req.file.originalname, contentType: req.file.mimetype, size: req.file.size, sha256, uploadedBy: req.user.userId,
+    });
+    await ledgerService.append({
+      chain: 'records', entityType: 'file', entityId: fileId, action: 'FILE_ATTACHED',
+      actorId: req.user.userId, actorRole: req.user.role, payloadHash: sha256,
+      meta: { recordId: record._id.toString(), filename: req.file.originalname, size: req.file.size },
+    });
+    // The record's own content (its attachment list) changed too, so chain a new version.
+    record.version += 1;
+    const entry = await ledgerService.recordEvent({ entityType: 'record', entity: record, action: 'UPDATE', actor: req.user, meta: { attached: fileId } });
+\end{lstlisting}
+
+\begin{howto}
+\begin{enumerate}
+  \item multer accepts one file, checks its type and size, and keeps it in
+    memory (at most 10\,MB).
+  \item The SHA-256 of the bytes is computed \emph{before} storage.
+  \item The bytes stream into GridFS, which splits them into 255\,kB chunks.
+  \item Two ledger entries: \code{FILE\_ATTACHED} with the file's hash (the
+    place where the paper put the IPFS content hash), and a record
+    \code{UPDATE}, because the record's attachment list is part of its protected
+    content.
+\end{enumerate}
+\end{howto}
+
+\subsection{Downloading}
+
+\begin{lstlisting}[language=JavaScript,caption={Consent-gated download (\file{src/modules/records/files.routes.js})}]
+    const record = await MedicalRecord.findOne({ 'attachments.fileId': req.params.fileId });
+    if (!record) throw notFound('File not found');
+    await consentService.assertCanAccessPatient(req, record.patientId, { purpose: 'download file' });
+
+    const attachment = record.attachments.find((a) => a.fileId === req.params.fileId);
+    res.set({
+      'Content-Type': attachment.contentType,
+      'Content-Length': attachment.size,
+      'Content-Disposition': `inline; filename="${attachment.filename.replace(/"/g, '')}"`,
+      'X-Content-SHA256': attachment.sha256,
+      'Cache-Control': 'private, no-store',
+    });
+    getBucket().openDownloadStream(new mongoose.Types.ObjectId(req.params.fileId))
+      .on('error', () => { if (!res.headersSent) res.status(404).end(); else res.end(); })
+      .pipe(res);
+\end{lstlisting}
+
+A file is reachable only through its record, so it inherits exactly the
+record's access rules. \code{no-store} keeps medical files out of shared
+caches. The expected hash travels in \code{X-Content-SHA256} so a client can
+check the download itself.
+
+\subsection{Verifying a record and its files}
+
+\begin{lstlisting}[language=JavaScript,caption={Per-record integrity check (\file{records.routes.js})}]
+  const record = await loadRecordWithAccess(req);
+  const content = await ledgerService.verifyEntity('record', record);
+
+  const files = [];
+  for (const attachment of record.attachments) {
+    const hash = crypto.createHash('sha256');
+    try {
+      await new Promise((resolve, reject) => {
+        getBucket().openDownloadStream(new mongoose.Types.ObjectId(attachment.fileId))
+          .on('data', (chunk) => hash.update(chunk)).on('error', reject).on('end', resolve);
+      });
+      const actual = hash.digest('hex');
+      files.push({ fileId: attachment.fileId, filename: attachment.filename, matches: actual === attachment.sha256, expected: attachment.sha256, actual });
+    } catch (error) {
+      files.push({ fileId: attachment.fileId, filename: attachment.filename, matches: false, error: 'file_missing' });
+    }
+  }
+  const intact = content.matches && files.every((f) => f.matches);
+\end{lstlisting}
+
+The \emph{Verify integrity} button on a record (patient and doctor dashboards)
+calls this. It re-hashes the record's content and every stored file, streaming
+the bytes so large files do not fill memory, and reports which part, if any, no
+longer matches the ledger.

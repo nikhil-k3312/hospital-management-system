@@ -1,0 +1,204 @@
+%% =====================================================================
+\chapter{Appointments}\label{ch:appointments}
+
+\textbf{What it does.} Patients see a doctor's free slots and book one. Doctors
+confirm, complete or mark no-show. Patients can reschedule; either side can
+cancel. Completing a visit raises the bill.
+
+\textbf{Files.} \file{src\codesl{}models\codesl{}Appointment\codedot{}js},
+\file{src\codesl{}modules\codesl{}appointments\codesl{}slots\codedot{}js},
+\file{src\codesl{}modules\codesl{}appointments\codesl{}appointments\codedot{}routes\codedot{}js},
+\file{src\codesl{}modules\codesl{}users\codesl{}users\codedot{}routes\codedot{}js} (available slots).
+
+\section{Generating slots from availability}
+
+Doctors do not create slots one by one. Each doctor has an availability rule
+(for example Monday--Friday, 9:00--17:00, 30-minute slots) and slots are
+computed from it.
+
+\begin{lstlisting}[language=JavaScript,caption={buildDaySlots and isValidSlot (\file{src/modules/appointments/slots.js})}]
+function buildDaySlots(availability, dateString, maxAdvanceDays, now = new Date()) {
+  const [year, month, day] = dateString.split('-').map(Number);
+  const date = new Date(year, month - 1, day);
+  if (Number.isNaN(date.getTime())) return [];
+
+  const latest = new Date(now);
+  latest.setDate(latest.getDate() + maxAdvanceDays);
+  if (date > latest) return [];
+  if (!availability.days.includes(date.getDay())) return [];
+
+  const slots = [];
+  const stepMs = availability.slotMinutes * 60 * 1000;
+  const dayEnd = new Date(year, month - 1, day, availability.endHour, 0, 0, 0);
+  for (let t = new Date(year, month - 1, day, availability.startHour, 0, 0, 0); t.getTime() + stepMs <= dayEnd.getTime(); t = new Date(t.getTime() + stepMs)) {
+    if (t > now) slots.push({ start: t, end: new Date(t.getTime() + stepMs) });
+  }
+  return slots;
+}
+
+/** True when `start` is exactly one of the doctor's slot boundaries. */
+function isValidSlot(availability, start, maxAdvanceDays, now = new Date()) {
+  const dateString = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-${String(start.getDate()).padStart(2, '0')}`;
+  return buildDaySlots(availability, dateString, maxAdvanceDays, now).some((s) => s.start.getTime() === start.getTime());
+}
+\end{lstlisting}
+
+\begin{howto}
+\begin{itemize}
+  \item Days outside the doctor's working days, or beyond the hospital's
+    booking window (\code{maxAdvanceBookingDays}, an admin setting), have no
+    slots.
+  \item A slot is included only if it ends by \code{endHour}, and only if it is
+    still in the future.
+  \item \code{now} is a parameter so the unit tests can fix the clock.
+  \item \code{isValidSlot} is what the booking endpoint uses: a client cannot
+    book 9:07 or 3 a.m. by crafting a request, only a real slot.
+\end{itemize}
+\end{howto}
+
+\code{GET \codesl{}api\codesl{}doctors\codesl{}:doctorId\codesl{}available-slots?date=YYYY-MM-DD} builds the
+day's slots, then looks up appointments that already hold one of them, and marks
+each slot \code{available: true\codesl{}false}. The patient's booking dialog shows taken
+slots greyed out.
+
+\section{Double-booking prevention}
+
+Hiding taken slots in the interface is not enough: two patients can open the
+dialog at the same moment and click the same slot. The guarantee is enforced by
+the database:
+
+\begin{lstlisting}[language=JavaScript,caption={Partial unique index (\file{src/models/Appointment.js})}]
+  // True while the appointment occupies its slot. Cancelling sets it to false,
+  // which frees the slot for someone else.
+  holdsSlot: { type: Boolean, default: true },
+}, { timestamps: true });
+
+// Double-booking prevention at the database level: among appointments that
+// hold their slot, a doctor can have only one per start time. Even two
+// requests racing each other cannot both succeed.
+appointmentSchema.index(
+  { doctorId: 1, startTime: 1 },
+  { unique: true, partialFilterExpression: { holdsSlot: true } }
+);
+
+appointmentSchema.pre('validate', function syncHoldsSlot(next) {
+  this.holdsSlot = ACTIVE_STATUSES.includes(this.status);
+  next();
+});
+\end{lstlisting}
+
+\begin{howto}
+A \emph{unique index} makes MongoDB reject a second document with the same
+\code{(doctorId, startTime)}. A \emph{partial} index applies only to documents
+matching a filter: here, those with \code{holdsSlot: true}. Pending, confirmed
+and completed appointments hold their slot; cancelled and no-show ones do not.
+So cancelling an appointment frees the slot automatically, while a race between
+two bookings always ends with exactly one success. The \code{pre('validate')}
+hook keeps \code{holdsSlot} in step with \code{status} on every save.
+\end{howto}
+
+\section{Booking: \code{POST \codesl{}api\codesl{}appointments}}
+
+\begin{lstlisting}[language=JavaScript,caption={Booking a slot (\file{src/modules/appointments/appointments.routes.js})}]
+router.post('/', requireRole('patient'),
+  validate({ body: Joi.object({
+    doctorId: objectId().required(),
+    startTime: Joi.date().iso().greater('now').required(),
+    type: Joi.string().valid('consultation', 'follow_up', 'checkup').default('consultation'),
+    reason: Joi.string().trim().min(3).max(500).required(),
+  }) }),
+  asyncHandler(async (req, res) => {
+    const { doctorId, startTime, type, reason } = req.body;
+    const doctor = await User.findOne({ _id: doctorId, role: 'doctor', approvalStatus: 'approved', isActive: true });
+    if (!doctor) throw notFound('Doctor not found');
+
+    const settings = await HospitalSettings.getSingleton();
+    const start = new Date(startTime);
+    if (!isValidSlot(doctor.doctorProfile.availability, start, settings.maxAdvanceBookingDays)) {
+      throw badRequest('That time is not one of the doctor\'s available slots');
+    }
+
+    let appointment;
+    try {
+      appointment = await Appointment.create({
+        patientId: req.user.userId,
+        doctorId,
+        startTime: start,
+        endTime: new Date(start.getTime() + doctor.doctorProfile.availability.slotMinutes * 60000),
+        type,
+        reason,
+      });
+    } catch (error) {
+      if (error.code === 11000) throw conflict('This slot has just been booked. Please choose another time.', 'SLOT_TAKEN');
+      throw error;
+    }
+
+    await recordAppointmentEvent(appointment, 'CREATE', req);
+    await notificationService.notify(doctorId, {
+      type: 'info', title: 'New appointment request',
+      message: `A patient requested a ${type.replace('_', '-')} on ${fmt(start)}: "${reason}"`, page: 'appointments',
+    });
+    // ... 201 with the populated appointment
+\end{lstlisting}
+
+\begin{howto}
+Only verified, active doctors can be booked. The duplicate-key error (11000)
+from the unique index is translated into a friendly 409 \code{SLOT\_TAKEN}; the
+frontend shows the message and reloads the slot grid. Every booking is a ledger
+entry and a notification for the doctor.
+\end{howto}
+
+\section{Status changes, rescheduling and cancelling}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=1.0cm and 1.6cm]
+  \node[box] (p) {pending};
+  \node[box,right=of p] (c) {confirmed};
+  \node[box,right=of c,draw=okgreen,fill=green!6] (d) {completed\\\scriptsize raises a bill};
+  \node[box,below=of c] (n) {no\_show};
+  \node[box,below=of p,draw=badred,fill=red!3] (x) {cancelled};
+  \draw[arr] (p) -- node[lbl,above]{doctor} (c);
+  \draw[arr] (c) -- node[lbl,above]{doctor} (d);
+  \draw[arr] (c) -- node[lbl,right]{doctor} (n);
+  \draw[arr] (p) -- node[lbl,left]{either} (x);
+  \draw[arr] (c) -- node[lbl,above,sloped]{either} (x);
+  \draw[arr] (c.north) to[bend right=35] node[lbl,above]{patient reschedules} (p.north);
+\end{tikzpicture}
+\caption{Appointment states}\label{fig:appt-states}
+\end{figure}
+
+\begin{lstlisting}[language=JavaScript,caption={Allowed doctor transitions (\file{appointments.routes.js})}]
+const DOCTOR_TRANSITIONS = { pending: ['confirmed'], confirmed: ['completed', 'no_show'] };
+// ...
+      const allowed = DOCTOR_TRANSITIONS[appointment.status] || [];
+      if (!allowed.includes(req.body.status)) {
+        throw conflict(`Cannot change an appointment from "${appointment.status}" to "${req.body.status}"`, 'INVALID_TRANSITION');
+      }
+      if (req.body.status === 'completed' && appointment.startTime > new Date()) {
+        throw conflict('An appointment cannot be completed before it starts', 'INVALID_TRANSITION');
+      }
+      appointment.status = req.body.status;
+      if (req.body.notes !== undefined) appointment.notes = req.body.notes;
+      await appointment.save();
+      await recordAppointmentEvent(appointment, req.body.status.toUpperCase(), req);
+      // ... notify the patient
+      if (req.body.status === 'completed') {
+        const doctor = await User.findById(appointment.doctorId);
+        await createBillForAppointment(appointment, doctor, req.user);
+      }
+\end{lstlisting}
+
+\begin{itemize}
+  \item \textbf{Who may do what} is checked on the server: only the doctor
+    changes status (and only once approved), only the patient reschedules.
+  \item \textbf{Rescheduling} (\code{PATCH} with \code{startTime}) re-runs
+    \code{isValidSlot}, moves the appointment, sets it back to \emph{pending}
+    (the doctor must confirm the new time) and catches the same 11000 error if
+    the new slot was just taken.
+  \item \textbf{Cancelling} (\code{DELETE}) is allowed for pending and confirmed
+    appointments; the record stays (with who cancelled and why) and the slot is
+    freed through \code{holdsSlot}.
+  \item An appointment that is not yours returns \textbf{404}, not 403, so
+    appointment ids cannot be probed.
+\end{itemize}

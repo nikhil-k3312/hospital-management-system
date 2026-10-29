@@ -1,552 +1,183 @@
 <!DOCTYPE html>
-<html lang="en" class="light-mode">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HealthConnect Pro - Secure Login</title>
-    <meta name="description" content="Secure healthcare portal login for patients, doctors, administrators, and insurance providers">
-    <meta name="keywords" content="healthcare login, patient portal, medical records, healthcare portal">
-    
-    <!-- Security Headers -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; form-action 'self'; base-uri 'self'; frame-ancestors 'none'">
-    <meta http-equiv="X-Content-Type-Options" content="nosniff">
-    <meta http-equiv="X-Frame-Options" content="DENY">
-    <meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin">
-    
-    <!-- Favicon -->
-    <link rel="icon" type="image/x-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%230d9488'><path d='M12 2L13.88 7.33L19.5 8.24L15.25 12.37L16.3 18.02L12 15.27L7.7 18.02L8.75 12.37L4.5 8.24L10.12 7.33L12 2Z'/></svg>">
-    
-    <!-- Preload critical resources -->
+    <title>Sign in · MediChain</title>
+    <meta name="description" content="Secure sign-in for MediChain patients, doctors, administrators and insurance agents">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%230d9488'><path d='M12 2L13.88 7.33L19.5 8.24L15.25 12.37L16.3 18.02L12 15.27L7.7 18.02L8.75 12.37L4.5 8.24L10.12 7.33L12 2Z'/></svg>">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;600;700&family=Lora:wght@700&display=swap">
-    
-    <!-- Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;600;700&family=Lora:wght@700&display=swap" rel="stylesheet">
-    
-    <!-- Styles -->
     <link rel="stylesheet" href="loginstyle.css">
+    <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js" defer></script>
+    <script src="js/api.js" defer></script>
+    <script src="loginscript.js" defer></script>
 </head>
 <body class="light-mode">
-    <!-- Skip to main content link for accessibility -->
     <a href="#main-content" class="skip-link">Skip to main content</a>
-
-    <!-- Back to Home Button -->
-    <a href="../index.html" class="back-to-home" aria-label="Return to main website">
-        <i data-lucide="arrow-left" aria-hidden="true"></i>
-        Back to Home
-    </a>
-
-    <!-- Theme Toggle -->
-    <button id="darkModeToggle" class="theme-toggle" aria-label="Toggle dark mode">
-        <i data-lucide="sun" aria-hidden="true"></i>
-    </button>
+    <a href="/" class="back-to-home" aria-label="Return to the home page"><i data-lucide="arrow-left" aria-hidden="true"></i> Back to Home</a>
+    <button id="darkModeToggle" class="theme-toggle" aria-label="Toggle dark mode"><i data-lucide="sun" aria-hidden="true"></i></button>
 
     <div class="login-page">
-        <!-- Branding Section -->
         <section class="branding-section" aria-labelledby="branding-heading">
             <div class="branding-content">
-                <a href="../index.html" class="logo" aria-label="HealthConnect Pro Home">
-                    <i data-lucide="heart" aria-hidden="true"></i>
-                    <span>HealthConnect Pro</span>
-                </a>
-                
-                <h1 id="branding-heading">Your Health, Connected Securely</h1>
-                <p class="tagline">Access your medical records, schedule appointments, and connect with healthcare providers.</p>
-                
+                <a href="/" class="logo" aria-label="MediChain home"><i data-lucide="heart" aria-hidden="true"></i><span>MediChain</span></a>
+                <h1 id="branding-heading">Your health records, tamper-evident and in your control</h1>
+                <p class="tagline" id="hospitalTagline">Appointments, records, prescriptions and insurance claims in one secure place.</p>
                 <div class="trust-badges">
-                    <div class="trust-badge">
-                        <i data-lucide="shield-check" aria-hidden="true"></i>
-                        <span>HIPAA Compliant</span>
-                    </div>
-                    <div class="trust-badge">
-                        <i data-lucide="lock" aria-hidden="true"></i>
-                        <span>End-to-End Encrypted</span>
-                    </div>
-                    <div class="trust-badge">
-                        <i data-lucide="badge-check" aria-hidden="true"></i>
-                        <span>ISO 27001 Certified</span>
-                    </div>
+                    <div class="trust-badge"><i data-lucide="mail-check" aria-hidden="true"></i><span>Two-step login</span></div>
+                    <div class="trust-badge"><i data-lucide="link" aria-hidden="true"></i><span>Hash-chained ledger</span></div>
+                    <div class="trust-badge"><i data-lucide="user-check" aria-hidden="true"></i><span>Patient consent</span></div>
                 </div>
-
                 <div class="feature-highlights">
-                    <div class="feature-item">
-                        <i data-lucide="check-circle" aria-hidden="true"></i>
-                        <span>Secure messaging with healthcare providers</span>
-                    </div>
-                    <div class="feature-item">
-                        <i data-lucide="check-circle" aria-hidden="true"></i>
-                        <span>Access to medical records and test results</span>
-                    </div>
-                    <div class="feature-item">
-                        <i data-lucide="check-circle" aria-hidden="true"></i>
-                        <span>Online appointment scheduling</span>
-                    </div>
-                    <div class="feature-item">
-                        <i data-lucide="check-circle" aria-hidden="true"></i>
-                        <span>Prescription refill requests</span>
-                    </div>
+                    <div class="feature-item"><i data-lucide="check-circle" aria-hidden="true"></i><span>Book appointments in real available slots</span></div>
+                    <div class="feature-item"><i data-lucide="check-circle" aria-hidden="true"></i><span>Decide which doctors can read your records, and for how long</span></div>
+                    <div class="feature-item"><i data-lucide="check-circle" aria-hidden="true"></i><span>Every change is anchored in a verifiable ledger</span></div>
+                    <div class="feature-item"><i data-lucide="check-circle" aria-hidden="true"></i><span>File insurance claims and track them end to end</span></div>
                 </div>
             </div>
         </section>
 
-        <!-- Form Section -->
-        <main id="main-content" class="form-section" role="main">
+        <main id="main-content" class="form-section">
             <div class="form-container">
-                <!-- Security Status Indicator -->
-                <div class="security-status" aria-live="polite">
-                    <div class="security-badge">
-                        <i data-lucide="shield" aria-hidden="true"></i>
-                        <span>Security: Active</span>
-                    </div>
+                <div class="auth-toggle" role="tablist" aria-label="Sign in or create an account">
+                    <button id="loginToggle" class="toggle-btn active" role="tab" aria-selected="true" aria-controls="loginForm">Sign In</button>
+                    <button id="signupToggle" class="toggle-btn" role="tab" aria-selected="false" aria-controls="roleSelection">Create Account</button>
                 </div>
 
-                <!-- Hospital Selector -->
-                <div class="hospital-selector">
-                    <label for="hospitalDropdown">Select Healthcare Facility</label>
-                    <div class="select-wrapper">
-                        <select id="hospitalDropdown" class="form-input" aria-describedby="hospital-description">
-                            <option value="1">Metro General Hospital</option>
-                            <option value="2">University Medical Center</option>
-                            <option value="3">Community Health Clinic</option>
-                            <option value="4">Regional Specialty Center</option>
-                            <option value="5">Children's Healthcare Center</option>
-                        </select>
-                        <i class="select-icon" data-lucide="chevron-down" aria-hidden="true"></i>
-                    </div>
-                    <small id="hospital-description" class="description">Choose your primary healthcare facility</small>
-                </div>
-
-                <!-- Auth Toggle -->
-                <div class="auth-toggle" role="tablist" aria-label="Authentication method">
-                    <button id="loginToggle" class="toggle-btn active" role="tab" aria-selected="true" aria-controls="loginForm">
-                        Sign In
-                    </button>
-                    <button id="signupToggle" class="toggle-btn" role="tab" aria-selected="false" aria-controls="roleSelection">
-                        Create Account
-                    </button>
-                </div>
-
-                <!-- Login Form -->
-                <form id="loginForm" class="auth-form form-visible" aria-labelledby="login-heading">
-                    <input type="hidden" id="csrfToken" name="csrfToken">
-                    
+                <!-- Step 1: email + password -->
+                <form id="loginForm" class="auth-form form-visible" aria-labelledby="login-heading" novalidate>
                     <div class="form-header">
-                        <div class="header-icon">
-                            <i data-lucide="log-in" aria-hidden="true"></i>
-                        </div>
-                        <h2 id="login-heading">Welcome Back</h2>
-                        <p>Sign in to your HealthConnect Pro account</p>
+                        <div class="header-icon"><i data-lucide="log-in" aria-hidden="true"></i></div>
+                        <h2 id="login-heading">Welcome back</h2>
+                        <p>Sign in with your email and password. We will then email you a one-time code.</p>
                     </div>
-
                     <div class="form-group">
-                        <label for="userId" class="required">User ID</label>
-                        <div class="input-wrapper">
-                            <i class="input-icon" data-lucide="user" aria-hidden="true"></i>
-                            <input type="text" id="userId" class="form-input" placeholder="Enter your User ID" required maxlength="50" aria-describedby="user-id-description" autocomplete="username">
-                        </div>
-                        <small id="user-id-description" class="description">Your unique HealthConnect Pro identifier</small>
-                    </div>
-
-                    <div class="form-group">
-                        <label for="password" class="required">Password</label>
-                        <div class="input-wrapper">
-                            <i class="input-icon" data-lucide="lock" aria-hidden="true"></i>
-                            <input type="password" id="password" class="form-input" placeholder="Enter your password" required maxlength="100" autocomplete="current-password">
-                            <button type="button" class="toggle-password" aria-label="Show password">
-                                <i data-lucide="eye" aria-hidden="true"></i>
-                            </button>
-                        </div>
-                    </div>
-
-                    <div class="form-group checkbox-group">
-                        <input type="checkbox" id="rememberMe" class="form-checkbox">
-                        <label for="rememberMe">Remember me on this device</label>
-                    </div>
-
-                    <div class="form-group">
-                        <button type="submit" id="loginSubmitBtn" class="submit-btn">
-                            <span>Sign In</span>
-                            <div class="loading-spinner" aria-hidden="true"></div>
-                            <i data-lucide="arrow-right" aria-hidden="true"></i>
-                        </button>
-                    </div>
-
-                    <!-- Decentralized Authentication Options -->
-                    <div class="decentralized-auth">
-                        <h3>Secure Authentication Options</h3>
-                        <p>Choose your preferred secure login method:</p>
-                        
-                        <div class="decentralized-options">
-                            <button type="button" class="auth-option" id="biometricAuth" aria-label="Sign in with biometric authentication">
-                                <i data-lucide="fingerprint" aria-hidden="true"></i>
-                                <span>Biometric</span>
-                            </button>
-                            
-                            <button type="button" class="auth-option" id="hardwareKeyAuth" aria-label="Sign in with hardware security key">
-                                <i data-lucide="key" aria-hidden="true"></i>
-                                <span>Security Key</span>
-                            </button>
-                            
-                            <button type="button" class="auth-option" id="passkeyAuth" aria-label="Sign in with passkey">
-                                <i data-lucide="smartphone" aria-hidden="true"></i>
-                                <span>Passkey</span>
-                            </button>
-                            
-                            <button type="button" class="auth-option" id="localPinAuth" aria-label="Sign in with local PIN">
-                                <i data-lucide="lock" aria-hidden="true"></i>
-                                <span>Local PIN</span>
-                            </button>
-                        </div>
-                    </div>
-
-                    <div class="form-group text-center">
-                        <a href="#" id="forgotPasswordLink" class="forgot-link">
-                            <i data-lucide="help-circle" aria-hidden="true"></i>
-                            Forgot your password?
-                        </a>
-                    </div>
-
-                    <!-- Test Credentials Section -->
-                    <div id="testCredentials" class="test-credentials">
-                        <p>Test Accounts (Click to Auto-fill):</p>
-                        <div class="test-grid">
-                            <button type="button" class="test-user-btn" data-user="p1008" aria-label="Use patient test account">
-                                Patient Account
-                            </button>
-                            <button type="button" class="test-user-btn" data-user="d1001" aria-label="Use doctor test account">
-                                Doctor Account
-                            </button>
-                            <button type="button" class="test-user-btn" data-user="a1001" aria-label="Use admin test account">
-                                Admin Account
-                            </button>
-                            <button type="button" class="test-user-btn" data-user="i1001" aria-label="Use insurance test account">
-                                Insurance Account
-                            </button>
-                        </div>
-                        <p class="test-note">Note: These are test accounts for evaluation purposes</p>
-                    </div>
-                </form>
-
-                <!-- Role Selection -->
-                <div id="roleSelection" class="auth-form" aria-labelledby="role-selection-heading">
-                    <div class="form-header">
-                        <h2 id="role-selection-heading">Create Your Account</h2>
-                        <p>Select your role to get started</p>
-                    </div>
-
-                    <div class="role-grid">
-                        <div id="patientRoleCard" class="role-card" role="button" tabindex="0" aria-labelledby="patient-role-title">
-                            <i data-lucide="user" aria-hidden="true"></i>
-                            <h3 id="patient-role-title">Patient</h3>
-                            <p>Access your medical records and manage appointments</p>
-                        </div>
-
-                        <div id="doctorRoleCard" class="role-card" role="button" tabindex="0" aria-labelledby="doctor-role-title">
-                            <i data-lucide="stethoscope" aria-hidden="true"></i>
-                            <h3 id="doctor-role-title">Healthcare Provider</h3>
-                            <p>Access patient records and manage your practice</p>
-                        </div>
-
-                        <div id="adminRoleCard" class="role-card" role="button" tabindex="0" aria-labelledby="admin-role-title">
-                            <i data-lucide="shield" aria-hidden="true"></i>
-                            <h3 id="admin-role-title">Administrator</h3>
-                            <p>Manage facility operations and user accounts</p>
-                        </div>
-
-                        <div id="insuranceRoleCard" class="role-card" role="button" tabindex="0" aria-labelledby="insurance-role-title">
-                            <i data-lucide="file-text" aria-hidden="true"></i>
-                            <h3 id="insurance-role-title">Insurance Provider</h3>
-                            <p>Process claims and verify coverage information</p>
-                        </div>
-                    </div>
-
-                    <div class="form-footer">
-                        <p>Already have an account?</p>
-                        <button type="button" class="text-btn" onclick="showForm('loginForm')">
-                            Sign in here
-                        </button>
-                    </div>
-                </div>
-
-                <!-- Patient Registration Form -->
-                <form id="patientForm" class="auth-form registration-form" aria-labelledby="patient-form-heading">
-                    <input type="hidden" name="csrfToken">
-                    
-                    <button type="button" id="patientBackBtn" class="back-btn">
-                        <i data-lucide="arrow-left" aria-hidden="true"></i>
-                        Back to Role Selection
-                    </button>
-
-                    <div class="form-header">
-                        <div class="header-icon patient-icon">
-                            <i data-lucide="user" aria-hidden="true"></i>
-                        </div>
-                        <h2 id="patient-form-heading">Patient Registration</h2>
-                        <p>Create your patient account</p>
-                    </div>
-
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="patientFirstName" class="required">First Name</label>
-                            <input type="text" id="patientFirstName" class="form-input" placeholder="Enter your first name" required maxlength="50" autocomplete="given-name">
-                        </div>
-                        <div class="form-group">
-                            <label for="patientLastName" class="required">Last Name</label>
-                            <input type="text" id="patientLastName" class="form-input" placeholder="Enter your last name" required maxlength="50" autocomplete="family-name">
-                        </div>
-                    </div>
-
-                    <div class="form-group">
-                        <label for="patientDob" class="required">Date of Birth</label>
-                        <input type="date" id="patientDob" class="form-input" required aria-describedby="dob-description" autocomplete="bday">
-                        <small id="dob-description" class="description">Must be at least 13 years old</small>
-                    </div>
-
-                    <div class="form-group">
-                        <label for="patientEmail" class="required">Email Address</label>
+                        <label for="loginEmail" class="required">Email</label>
                         <div class="input-wrapper">
                             <i class="input-icon" data-lucide="mail" aria-hidden="true"></i>
-                            <input type="email" id="patientEmail" class="form-input" placeholder="Enter your email address" required maxlength="100" autocomplete="email">
+                            <input type="email" id="loginEmail" name="email" class="form-input" placeholder="you@example.com" required maxlength="254" autocomplete="username">
                         </div>
                     </div>
-
                     <div class="form-group">
-                        <label for="patientPhone" class="required">Phone Number</label>
-                        <div class="input-wrapper">
-                            <i class="input-icon" data-lucide="phone" aria-hidden="true"></i>
-                            <input type="tel" id="patientPhone" class="form-input" placeholder="+1 (555) 123-4567" pattern="^[\+]?[(]?[0-9]{3}[)]?[-\s\.]?[0-9]{3}[-\s\.]?[0-9]{4,6}$" required maxlength="20" autocomplete="tel">
-                        </div>
-                    </div>
-
-                    <div class="form-group">
-                        <label for="patientAddress" class="required">Street Address</label>
-                        <input type="text" id="patientAddress" class="form-input" placeholder="Enter your street address" required maxlength="100" autocomplete="street-address">
-                    </div>
-
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="patientCity" class="required">City</label>
-                            <input type="text" id="patientCity" class="form-input" placeholder="City" required maxlength="50" autocomplete="address-level2">
-                        </div>
-                        <div class="form-group">
-                            <label for="patientState" class="required">State</label>
-                            <select id="patientState" class="form-input" required autocomplete="address-level1">
-                                <option value="">Select State</option>
-                                <!-- States options would be added here -->
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label for="patientZip" class="required">ZIP Code</label>
-                            <input type="text" id="patientZip" class="form-input" placeholder="12345" pattern="^\d{5}(-\d{4})?$" required maxlength="10" autocomplete="postal-code">
-                        </div>
-                    </div>
-
-                    <div class="form-group">
-                        <label for="patientInsurance">Insurance Provider</label>
-                        <select id="patientInsurance" class="form-input">
-                            <option value="">Select insurance provider</option>
-                        </select>
-                    </div>
-
-                    <div class="form-group">
-                        <label for="patientPassword" class="required">Password</label>
+                        <label for="loginPassword" class="required">Password</label>
                         <div class="input-wrapper">
                             <i class="input-icon" data-lucide="lock" aria-hidden="true"></i>
-                            <input type="password" id="patientPassword" class="form-input" placeholder="Create a strong password" required maxlength="100" aria-describedby="password-requirements" autocomplete="new-password">
-                            <button type="button" class="toggle-password" aria-label="Show password">
-                                <i data-lucide="eye" aria-hidden="true"></i>
-                            </button>
-                        </div>
-                        <div class="password-strength" id="patientPasswordStrength">
-                            <div class="strength-bar"></div>
-                            <div class="strength-bar"></div>
-                            <div class="strength-bar"></div>
-                            <div class="strength-bar"></div>
-                        </div>
-                        <div class="password-requirements">
-                            <small id="password-requirements">Must be 8+ characters with uppercase, lowercase, number, and special character</small>
+                            <input type="password" id="loginPassword" name="password" class="form-input" placeholder="Your password" required maxlength="128" autocomplete="current-password">
+                            <button type="button" class="toggle-password" aria-label="Show password"><i data-lucide="eye" aria-hidden="true"></i></button>
                         </div>
                     </div>
-
+                    <div class="form-message" id="loginMessage" role="alert"></div>
                     <div class="form-group">
-                        <label for="patientConfirmPassword" class="required">Confirm Password</label>
-                        <div class="input-wrapper">
-                            <i class="input-icon" data-lucide="lock" aria-hidden="true"></i>
-                            <input type="password" id="patientConfirmPassword" class="form-input" placeholder="Confirm your password" required maxlength="100" autocomplete="new-password">
-                            <button type="button" class="toggle-password" aria-label="Show password">
-                                <i data-lucide="eye" aria-hidden="true"></i>
-                            </button>
-                        </div>
-                    </div>
-
-                    <div class="form-group">
-                        <div class="checkbox-group">
-                            <input type="checkbox" id="patientTerms" class="form-checkbox" required>
-                            <label for="patientTerms">
-                                I agree to the <a href="#" target="_blank">Terms of Service</a> and <a href="#" target="_blank">Privacy Policy</a>
-                            </label>
-                        </div>
-                    </div>
-
-                    <div class="form-group">
-                        <button type="submit" id="patientSubmitBtn" class="submit-btn">
-                            <span>Create Patient Account</span>
-                            <div class="loading-spinner" aria-hidden="true"></div>
-                            <i data-lucide="user-plus" aria-hidden="true"></i>
-                        </button>
+                        <button type="submit" id="loginSubmitBtn" class="submit-btn"><span>Continue</span><div class="loading-spinner" aria-hidden="true"></div><i data-lucide="arrow-right" aria-hidden="true"></i></button>
                     </div>
                 </form>
 
-                <!-- Two-Step Verification -->
+                <!-- Step 2: one-time code -->
                 <div id="twoStepVerification" class="auth-form" aria-labelledby="two-step-heading">
-                    <button type="button" id="twoStepBackBtn" class="back-btn">
-                        <i data-lucide="arrow-left" aria-hidden="true"></i>
-                        Back to Sign In
-                    </button>
-
+                    <button type="button" id="twoStepBackBtn" class="back-btn"><i data-lucide="arrow-left" aria-hidden="true"></i> Back to sign in</button>
                     <div class="form-header">
-                        <div class="header-icon">
-                            <i data-lucide="shield" aria-hidden="true"></i>
-                        </div>
-                        <h2 id="two-step-heading">Two-Step Verification</h2>
-                        <p>We sent a verification code to <span id="verificationContact">your registered contact</span></p>
-                        <div class="verification-code-display" id="verificationCodeDisplay"></div>
+                        <div class="header-icon"><i data-lucide="shield" aria-hidden="true"></i></div>
+                        <h2 id="two-step-heading">Check your email</h2>
+                        <p>We sent a 6-digit code to <strong id="verificationContact"></strong>. It expires in <span id="otpMinutes">10</span> minutes.</p>
                     </div>
-
-                    <!-- Auto-fill Button for convenience -->
-                    <div class="auto-fill-section">
-                        <button type="button" id="autoFillCode" class="auto-fill-btn">
-                            <i data-lucide="copy" aria-hidden="true"></i>
-                            Auto-fill Verification Code
-                        </button>
-                    </div>
-
                     <div class="code-inputs">
-                        <input type="text" class="code-input" maxlength="1" inputmode="numeric" pattern="[0-9]*" aria-label="First digit of verification code">
-                        <input type="text" class="code-input" maxlength="1" inputmode="numeric" pattern="[0-9]*" aria-label="Second digit of verification code">
-                        <input type="text" class="code-input" maxlength="1" inputmode="numeric" pattern="[0-9]*" aria-label="Third digit of verification code">
-                        <input type="text" class="code-input" maxlength="1" inputmode="numeric" pattern="[0-9]*" aria-label="Fourth digit of verification code">
-                        <input type="text" class="code-input" maxlength="1" inputmode="numeric" pattern="[0-9]*" aria-label="Fifth digit of verification code">
-                        <input type="text" class="code-input" maxlength="1" inputmode="numeric" pattern="[0-9]*" aria-label="Sixth digit of verification code">
+                        <input type="text" class="code-input" maxlength="6" inputmode="numeric" pattern="[0-9]*" aria-label="Digit 1" autocomplete="one-time-code">
+                        <input type="text" class="code-input" maxlength="6" inputmode="numeric" pattern="[0-9]*" aria-label="Digit 2">
+                        <input type="text" class="code-input" maxlength="6" inputmode="numeric" pattern="[0-9]*" aria-label="Digit 3">
+                        <input type="text" class="code-input" maxlength="6" inputmode="numeric" pattern="[0-9]*" aria-label="Digit 4">
+                        <input type="text" class="code-input" maxlength="6" inputmode="numeric" pattern="[0-9]*" aria-label="Digit 5">
+                        <input type="text" class="code-input" maxlength="6" inputmode="numeric" pattern="[0-9]*" aria-label="Digit 6">
                     </div>
-
+                    <div class="form-message" id="otpMessage" role="alert"></div>
                     <div class="form-group">
-                        <button type="button" id="verifyCodeBtn" class="submit-btn">
-                            <span>Verify Code</span>
-                            <div class="loading-spinner" aria-hidden="true"></div>
-                            <i data-lucide="check" aria-hidden="true"></i>
-                        </button>
+                        <button type="button" id="verifyCodeBtn" class="submit-btn"><span>Verify and sign in</span><div class="loading-spinner" aria-hidden="true"></div><i data-lucide="check" aria-hidden="true"></i></button>
                     </div>
-
                     <div class="resend-section">
-                        <button type="button" id="resendCodeBtn" class="text-btn">
-                            Didn't receive the code? <strong>Resend</strong>
-                        </button>
-                    </div>
-
-                    <div class="verification-methods">
-                        <p>Or verify using:</p>
-                        <div class="method-buttons">
-                            <button type="button" id="verifyViaEmailBtn" class="method-btn active" aria-pressed="true">
-                                <i data-lucide="mail" aria-hidden="true"></i>
-                                Email
-                            </button>
-                            <button type="button" id="verifyViaSmsBtn" class="method-btn" aria-pressed="false">
-                                <i data-lucide="phone" aria-hidden="true"></i>
-                                SMS
-                            </button>
-                            <button type="button" id="verifyViaAuthenticatorBtn" class="method-btn" aria-pressed="false">
-                                <i data-lucide="smartphone" aria-hidden="true"></i>
-                                Authenticator
-                            </button>
-                        </div>
+                        <button type="button" id="resendCodeBtn" class="text-btn">Didn't receive the code? <strong>Resend</strong></button>
                     </div>
                 </div>
 
-                <!-- Footer -->
-                <div class="form-footer">
-                    <p>&copy; <span class="copyright-year">2024</span> HealthConnect Pro. All rights reserved.</p>
-                    <div class="footer-links">
-                        <a href="#" target="_blank">Privacy Policy</a>
-                        <span aria-hidden="true">•</span>
-                        <a href="#" target="_blank">Terms of Service</a>
-                        <span aria-hidden="true">•</span>
-                        <a href="#" target="_blank">Support</a>
+                <!-- Registration: choose a role -->
+                <div id="roleSelection" class="auth-form" aria-labelledby="role-selection-heading">
+                    <div class="form-header">
+                        <h2 id="role-selection-heading">Create your account</h2>
+                        <p>Who are you registering as?</p>
                     </div>
+                    <div class="role-grid">
+                        <div class="role-card" data-role="patient" role="button" tabindex="0"><i data-lucide="user" aria-hidden="true"></i><h3>Patient</h3><p>Book appointments, see your records, control access</p></div>
+                        <div class="role-card" data-role="doctor" role="button" tabindex="0"><i data-lucide="stethoscope" aria-hidden="true"></i><h3>Doctor</h3><p>Verified by an administrator before clinical access</p></div>
+                        <div class="role-card" data-role="insurance_agent" role="button" tabindex="0"><i data-lucide="file-text" aria-hidden="true"></i><h3>Insurance agent</h3><p>Review and settle claims for your company</p></div>
+                    </div>
+                    <p class="description" style="text-align:center;margin-top:1rem;">Administrator accounts are created by an existing administrator.</p>
+                </div>
+
+                <!-- Registration form (fields change with the chosen role) -->
+                <form id="registerForm" class="auth-form registration-form" aria-labelledby="register-heading" novalidate>
+                    <button type="button" id="registerBackBtn" class="back-btn"><i data-lucide="arrow-left" aria-hidden="true"></i> Choose another role</button>
+                    <div class="form-header">
+                        <div class="header-icon" id="registerIcon"><i data-lucide="user-plus" aria-hidden="true"></i></div>
+                        <h2 id="register-heading">Registration</h2>
+                        <p id="registerSubtitle"></p>
+                    </div>
+                    <div class="form-group"><label for="regName" class="required">Full name</label><input id="regName" name="fullName" class="form-input" required minlength="2" maxlength="100" autocomplete="name"></div>
+                    <div class="form-row">
+                        <div class="form-group"><label for="regEmail" class="required">Email</label><input type="email" id="regEmail" name="email" class="form-input" required maxlength="254" autocomplete="email"></div>
+                        <div class="form-group"><label for="regPhone">Phone</label><input type="tel" id="regPhone" name="phone" class="form-input" maxlength="30" autocomplete="tel" placeholder="+91 98765 43210"></div>
+                    </div>
+
+                    <div data-for="patient">
+                        <div class="form-row">
+                            <div class="form-group"><label for="regDob">Date of birth</label><input type="date" id="regDob" name="dateOfBirth" class="form-input"></div>
+                            <div class="form-group"><label for="regGender">Gender</label><select id="regGender" name="gender" class="form-input"><option value="">Prefer not to say</option><option value="female">Female</option><option value="male">Male</option><option value="other">Other</option></select></div>
+                            <div class="form-group"><label for="regBlood">Blood type</label><select id="regBlood" name="bloodType" class="form-input"><option value="">Unknown</option><option>A+</option><option>A-</option><option>B+</option><option>B-</option><option>AB+</option><option>AB-</option><option>O+</option><option>O-</option></select></div>
+                        </div>
+                        <div class="form-group"><label for="regAddress">Address</label><input id="regAddress" name="address" class="form-input" maxlength="300" autocomplete="street-address"></div>
+                        <div class="form-row">
+                            <div class="form-group"><label for="regInsurer">Insurance provider</label><select id="regInsurer" name="insuranceProvider" class="form-input" data-insurers><option value="">None</option></select></div>
+                            <div class="form-group"><label for="regPolicy">Policy number</label><input id="regPolicy" name="policyNumber" class="form-input" maxlength="60"></div>
+                        </div>
+                        <div class="form-group"><label for="regEmergency">Emergency contact</label><input id="regEmergency" name="emergencyContact" class="form-input" maxlength="150" placeholder="Name and phone"></div>
+                    </div>
+
+                    <div data-for="doctor">
+                        <div class="form-row">
+                            <div class="form-group"><label for="regSpec" class="required">Specialization</label><select id="regSpec" name="specialization" class="form-input" data-departments></select></div>
+                            <div class="form-group"><label for="regLicense" class="required">Medical licence number</label><input id="regLicense" name="licenseNumber" class="form-input" maxlength="60" placeholder="e.g. KMC-12345"></div>
+                        </div>
+                    </div>
+
+                    <div data-for="insurance_agent">
+                        <div class="form-row">
+                            <div class="form-group"><label for="regCompany" class="required">Insurance company</label><select id="regCompany" name="company" class="form-input" data-insurers></select></div>
+                            <div class="form-group"><label for="regEmployee">Employee ID</label><input id="regEmployee" name="employeeId" class="form-input" maxlength="60"></div>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="regPassword" class="required">Password</label>
+                        <div class="input-wrapper">
+                            <input type="password" id="regPassword" name="password" class="form-input" required minlength="8" maxlength="128" autocomplete="new-password">
+                            <button type="button" class="toggle-password" aria-label="Show password"><i data-lucide="eye" aria-hidden="true"></i></button>
+                        </div>
+                        <div class="password-strength" id="regPasswordStrength"><div class="strength-bar"></div><div class="strength-bar"></div><div class="strength-bar"></div><div class="strength-bar"></div></div>
+                        <small class="description">8+ characters with upper case, lower case, a number and a symbol</small>
+                    </div>
+                    <div class="form-group"><label for="regConfirm" class="required">Confirm password</label><input type="password" id="regConfirm" class="form-input" required autocomplete="new-password"></div>
+                    <div class="form-message" id="registerMessage" role="alert"></div>
+                    <div class="form-group">
+                        <button type="submit" id="registerSubmitBtn" class="submit-btn"><span>Create account</span><div class="loading-spinner" aria-hidden="true"></div><i data-lucide="user-plus" aria-hidden="true"></i></button>
+                    </div>
+                </form>
+
+                <div class="form-footer">
+                    <p>&copy; <span class="copyright-year"></span> <span class="hospital-name">MediChain</span></p>
                 </div>
             </div>
         </main>
     </div>
 
-    <!-- Session Timeout Warning Modal -->
-    <div id="sessionTimeoutModal" class="modal-overlay" role="dialog" aria-labelledby="session-timeout-heading" aria-modal="true">
-        <div class="modal-content">
-            <div class="modal-icon warning">
-                <i data-lucide="clock" aria-hidden="true"></i>
-            </div>
-            <h2 id="session-timeout-heading">Session About to Expire</h2>
-            <p>Your session will expire in <span id="sessionCountdown">5:00</span> due to inactivity.</p>
-            
-            <div class="modal-actions">
-                <button type="button" id="extendSessionBtn" class="submit-btn">
-                    <span>Stay Logged In</span>
-                </button>
-                <button type="button" id="logoutBtn" class="text-btn">
-                    Log Out
-                </button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Enhanced Security Modal -->
-    <div id="securityModal" class="modal-overlay" role="dialog" aria-labelledby="security-heading" aria-modal="true">
-        <div class="modal-content">
-            <div class="modal-icon success">
-                <i data-lucide="shield-check" aria-hidden="true"></i>
-            </div>
-            <h2 id="security-heading">Security Status</h2>
-            <p id="security-message">All security systems are active and monitoring</p>
-            
-            <div class="security-status-list">
-                <div class="status-item">
-                    <i data-lucide="check-circle" class="success"></i>
-                    <span>Encryption: Active</span>
-                </div>
-                <div class="status-item">
-                    <i data-lucide="check-circle" class="success"></i>
-                    <span>Session Protection: Active</span>
-                </div>
-                <div class="status-item">
-                    <i data-lucide="check-circle" class="success"></i>
-                    <span>Rate Limiting: Active</span>
-                </div>
-                <div class="status-item">
-                    <i data-lucide="check-circle" class="success"></i>
-                    <span>Input Validation: Active</span>
-                </div>
-            </div>
-            
-            <div class="modal-actions">
-                <button type="button" id="closeSecurityModal" class="submit-btn">
-                    <span>Continue</span>
-                </button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Notification -->
     <div id="notification" class="notification" role="alert" aria-live="polite"></div>
-
-    <!-- Audit Log Display -->
-    <div class="audit-log" id="auditLog" aria-live="polite">
-        Security audit trail active - Last updated: <span id="auditTimestamp">Just now</span>
-    </div>
-
-    <!-- Lucide Icons -->
-    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-    
-    <!-- Main Script -->
-    <script src="loginscript.js"></script>
 </body>
 </html>

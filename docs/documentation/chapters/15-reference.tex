@@ -1,0 +1,171 @@
+%% =====================================================================
+\chapter{Reference: Data Model and API}\label{ch:reference}
+
+\section{MongoDB collections}
+
+\begin{longtable}{@{}P{3cm}P{6.6cm}P{4.4cm}@{}}
+\caption{Collections}\label{tab:collections}\\
+\toprule
+\textbf{Collection} & \textbf{Holds} & \textbf{Key indexes / rules} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Collection} & \textbf{Holds} & \textbf{Key indexes / rules} \\
+\midrule
+\endhead
+\code{users} & All accounts and role profiles, approval, lockout & unique \code{email}; \code{(role, approvalStatus)} \\
+\code{appointments} & Bookings with status, notes, cancellation & unique \code{(doctorId, startTime)} where \code{holdsSlot} \\
+\code{accessgrants} & Patient consents to doctors & \code{(patientId, doctorId, status)} \\
+\code{medicalrecords} & Clinical records, versions, attachment metadata & \code{patientId} \\
+\code{uploads.files}, \code{uploads.chunks} & GridFS file storage & managed by GridFS \\
+\code{prescriptions} & Medications, refills & \code{patientId}, \code{doctorId} \\
+\code{vitalreadings} & Device and manual readings, abnormal flags & \code{(patientId, recordedAt)} \\
+\code{devices} & IoT devices, hashed API keys & unique \code{serialNumber}, \code{apiKeyHash} \\
+\code{bills} & Consultation bills and payment/coverage & unique \code{billNumber} \\
+\code{claims} & Insurance claims with history & unique \code{claimNumber}; \code{insuranceProvider} \\
+\code{notifications} & In-app notifications & by user \\
+\code{hospitalsettings} & The single settings document & unique \code{key} \\
+\code{ledgerentries} & Both hash chains & unique \code{(chain, seq)} \\
+\bottomrule
+\end{longtable}
+
+Redis keys are listed in Table~\ref{tab:redis} (Section~\ref{sec:redis-keys}).
+
+\section{Response format and error codes}
+
+Success: \code{\{ "success": true, "data": ..., "message"?: ..., "meta"?: ... \}}.
+Failure: \code{\{ "success": false, "message": ..., "code"?: ..., "errors"?: [...] \}}.
+
+\begin{table}[H]
+\centering\small
+\caption{HTTP status codes}\label{tab:status}
+\begin{tabularx}{\textwidth}{@{}P{1.2cm}Y@{}}
+\toprule
+\textbf{Code} & \textbf{Meaning in MediChain} \\
+\midrule
+400 & Validation failed (\code{errors} lists every problem), malformed JSON, invalid id \\
+401 & Not logged in, token expired or revoked, wrong password or code \\
+403 & Wrong role, approval pending, trust score too low, no consent, account locked \\
+404 & Not found, or not yours (ids of other users' items are not confirmed) \\
+409 & Conflict: slot taken, invalid state transition, duplicate request \\
+413 & Body or file too large \\
+429 & Rate limit or OTP attempt limit reached \\
+503 & Redis (security state) unavailable: the request fails closed \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Endpoints}
+
+All paths start with \code{\codesl{}api}. ``Auth'' means any logged-in user; roles are
+enforced by \code{requireRole}. ``HS'' marks routes that require the
+high-sensitivity trust score (70); ``BG'' marks routes that accept break-glass.
+
+\begin{longtable}{@{}P{1.2cm}P{5.4cm}P{2.6cm}P{4.8cm}@{}}
+\caption{API endpoints}\label{tab:api}\\
+\toprule
+\textbf{Method} & \textbf{Path} & \textbf{Who} & \textbf{Purpose} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Method} & \textbf{Path} & \textbf{Who} & \textbf{Purpose} \\
+\midrule
+\endhead
+\multicolumn{4}{@{}l}{\textit{Auth}}\\
+POST & \code{\codesl{}auth\codesl{}register} & public & Create patient, doctor or agent account \\
+POST & \code{\codesl{}auth\codesl{}login\codesl{}request-otp} & public & Check password, email a code \\
+POST & \code{\codesl{}auth\codesl{}login\codesl{}verify-otp} & public & Exchange the code for tokens \\
+POST & \code{\codesl{}auth\codesl{}refresh-token} & cookie & Rotate refresh token, new access token \\
+POST & \code{\codesl{}auth\codesl{}logout} & Auth & Revoke both tokens \\
+POST & \code{\codesl{}auth\codesl{}change-password} & Auth & Change password, sign out everywhere \\
+\multicolumn{4}{@{}l}{\textit{Public, profile and directory}}\\
+GET & \code{\codesl{}settings\codesl{}public} & public & Hospital name, insurers, departments \\
+GET & \code{\codesl{}public\codesl{}stats} & public & Anonymous counts for the homepage \\
+GET & \code{\codesl{}users\codesl{}me} & Auth & Own account and current trust score \\
+PATCH & \code{\codesl{}users\codesl{}me} & Auth & Edit own profile (own role's section only) \\
+GET & \code{\codesl{}doctors} & Auth & Verified doctors \\
+GET & \code{\codesl{}doctors\codesl{}:id\codesl{}available-slots} & Auth & Slots of a day with availability \\
+GET & \code{\codesl{}patients} & doctor & Doctor's patients with consent status \\
+GET & \code{\codesl{}patients\codesl{}search?email=} & doctor & Find a patient to request access \\
+\multicolumn{4}{@{}l}{\textit{Appointments}}\\
+POST & \code{\codesl{}appointments} & patient & Book a slot \\
+GET & \code{\codesl{}appointments} & Auth & Own appointments (all for admin) \\
+GET & \code{\codesl{}appointments\codesl{}:id} & party/admin & One appointment \\
+PATCH & \code{\codesl{}appointments\codesl{}:id} & doctor/patient & Status + notes (doctor), reschedule (patient) \\
+DELETE & \code{\codesl{}appointments\codesl{}:id} & party/admin & Cancel, freeing the slot \\
+\multicolumn{4}{@{}l}{\textit{Consent}}\\
+GET & \code{\codesl{}consents} & patient, doctor & Own grants and requests \\
+POST & \code{\codesl{}consents\codesl{}request} & doctor & Ask a patient for access \\
+POST & \code{\codesl{}consents\codesl{}grant} & patient & Grant a doctor access directly \\
+POST & \code{\codesl{}consents\codesl{}:id\codesl{}approve} & patient & Approve a request with a duration \\
+POST & \code{\codesl{}consents\codesl{}:id\codesl{}deny} & patient & Deny a request \\
+POST & \code{\codesl{}consents\codesl{}:id\codesl{}revoke} & patient & End access immediately \\
+\multicolumn{4}{@{}l}{\textit{Records and files}}\\
+POST & \code{\codesl{}records} & patient, doctor (HS) & Create record / own upload entry \\
+GET & \code{\codesl{}records?patientId=} & patient, doctor (HS, BG) & List a patient's records \\
+GET & \code{\codesl{}records\codesl{}:id} & patient, doctor (HS, BG) & One record \\
+PATCH & \code{\codesl{}records\codesl{}:id} & author doctor (HS) & Amend, new version \\
+GET & \code{\codesl{}records\codesl{}:id\codesl{}ledger-history} & patient, doctor (HS, BG) & Ledger trail of the record \\
+GET & \code{\codesl{}records\codesl{}:id\codesl{}verify} & patient, doctor (HS, BG) & Integrity check of content and files \\
+POST & \code{\codesl{}records\codesl{}:id\codesl{}files} & patient, doctor (HS) & Upload an attachment \\
+GET & \code{\codesl{}files\codesl{}:fileId} & patient, doctor (HS, BG) & Download, with \code{X-Content-SHA256} \\
+\multicolumn{4}{@{}l}{\textit{Prescriptions}}\\
+POST & \code{\codesl{}prescriptions} & doctor (HS) & Prescribe (needs consent) \\
+GET & \code{\codesl{}prescriptions} & patient, doctor & Own / a patient's prescriptions \\
+POST & \code{\codesl{}prescriptions\codesl{}:id\codesl{}refill-request} & patient & Ask for a refill \\
+PATCH & \code{\codesl{}prescriptions\codesl{}:id} & author doctor & Approve/deny refill, complete, cancel \\
+\multicolumn{4}{@{}l}{\textit{Vitals and IoT}}\\
+POST & \code{\codesl{}devices\codesl{}readings} & device key & Ingest a device reading \\
+POST & \code{\codesl{}vitals} & patient & Add a manual reading \\
+GET & \code{\codesl{}vitals} & patient, doctor (BG) & History with normal ranges \\
+GET & \code{\codesl{}vitals\codesl{}monitor} & doctor & Latest reading of every consenting patient \\
+GET & \code{\codesl{}devices\codesl{}mine} & patient & Own devices \\
+\multicolumn{4}{@{}l}{\textit{Billing and claims}}\\
+GET & \code{\codesl{}bills} & patient, admin & Bills \\
+POST & \code{\codesl{}bills\codesl{}:id\codesl{}pay} & patient & Record payment of the balance \\
+POST & \code{\codesl{}claims} & patient & File a claim on an unpaid bill \\
+GET & \code{\codesl{}claims} & patient, agent, admin & Own claims / insurer's queue / all \\
+GET & \code{\codesl{}claims\codesl{}settlements} & agent, admin & Settled claims \\
+GET & \code{\codesl{}claims\codesl{}reports} & agent, admin & Aggregated figures \\
+GET & \code{\codesl{}claims\codesl{}:id} & patient, agent, admin & One claim with ledger history \\
+PATCH & \code{\codesl{}claims\codesl{}:id} & agent & Move through the state machine \\
+\multicolumn{4}{@{}l}{\textit{Notifications}}\\
+GET & \code{\codesl{}notifications} & Auth & Own notifications and unread count \\
+PATCH & \code{\codesl{}notifications\codesl{}:id\codesl{}read} & Auth & Mark one read \\
+POST & \code{\codesl{}notifications\codesl{}read-all} & Auth & Mark all read \\
+\multicolumn{4}{@{}l}{\textit{Admin (all: admin role)}}\\
+GET & \code{\codesl{}admin\codesl{}users} & admin & Search and filter users \\
+POST & \code{\codesl{}admin\codesl{}users} & admin & Create a staff account \\
+PATCH & \code{\codesl{}admin\codesl{}users\codesl{}:id} & admin & Activate / deactivate \\
+GET & \code{\codesl{}admin\codesl{}doctors\codesl{}pending-verification} & admin & Doctors and agents awaiting approval \\
+PATCH & \code{\codesl{}admin\codesl{}doctors\codesl{}:id\codesl{}verify} & admin & Approve or reject \\
+GET & \code{\codesl{}admin\codesl{}stats} & admin & Live statistics \\
+GET, PATCH & \code{\codesl{}admin\codesl{}settings} & admin & Read / change hospital settings \\
+GET & \code{\codesl{}admin\codesl{}audit} & admin & Access chain (zero-trust decisions) \\
+GET, POST & \code{\codesl{}admin\codesl{}devices} & admin & List / register IoT devices \\
+PATCH & \code{\codesl{}admin\codesl{}devices\codesl{}:id} & admin & Activate / deactivate a device \\
+\multicolumn{4}{@{}l}{\textit{Ledger (all: admin role)}}\\
+GET & \code{\codesl{}ledger\codesl{}stats} & admin & Entries and head hash per chain \\
+GET & \code{\codesl{}ledger\codesl{}entries} & admin & Browse blocks, newest first \\
+GET & \code{\codesl{}ledger\codesl{}verify} & admin & Full integrity audit \\
+\bottomrule
+\end{longtable}
+
+\section{Glossary}
+
+\begin{description}[style=nextline,leftmargin=1cm]
+  \item[Break-glass] Audited emergency access that bypasses consent.
+  \item[Canonical JSON] JSON with sorted keys and fixed formats, so equal data
+    always gives an equal hash.
+  \item[Chain head] The newest entry of a hash chain; its hash fingerprints the
+    whole history.
+  \item[Consent / grant] A patient's permission for one doctor, with an expiry.
+  \item[GridFS] MongoDB's way of storing large files in chunks.
+  \item[JWT] JSON Web Token: a signed, self-contained token carrying the user id,
+    role and expiry.
+  \item[jti] The unique id inside a JWT, used to revoke that exact token.
+  \item[OTP] One-time password: the 6-digit emailed login code.
+  \item[RBAC / ABAC] Role-based and attribute-based access control.
+  \item[Trust score] 0--100 estimate of how likely a request comes from the
+    account's real owner.
+\end{description}

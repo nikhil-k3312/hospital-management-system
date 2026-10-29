@@ -6,3 +6,17 @@ logs/
 backend/logs/
 backend/services/auth/logs/
 backend/services/auth/node_modules/
+.DS_Store
+coverage/
+backend/services/api/scripts/.demo-devices.json
+frontend/node_modules/
+*.aux
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.fls
+*.fdb_latexmk
+backend/services/api/scripts/.tamper-state.json
+*.lol

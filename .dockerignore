@@ -1,0 +1,15 @@
+**/node_modules
+**/.env
+**/*.env
+!**/.env.example
+**/coverage
+**/logs
+.git
+.github
+.claude
+docs
+frontend/tests
+frontend/package*.json
+backend/services/api/tests
+backend/services/api/scripts/.demo-devices.json
+backend/services/api/scripts/.tamper-state.json

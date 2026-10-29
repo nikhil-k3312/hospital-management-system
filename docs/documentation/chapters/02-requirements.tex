@@ -1,0 +1,99 @@
+%% =====================================================================
+\chapter{Requirements}\label{ch:requirements}
+
+This chapter lists what the system must do, per user role, and the quality bars
+it must meet. The ``Where'' column points to the chapter that explains the
+implementation. Every requirement listed here is implemented and covered by
+tests unless marked otherwise.
+
+\section{Users and roles}
+
+\begin{table}[H]
+\centering\small
+\caption{Roles}\label{tab:roles}
+\begin{tabularx}{\textwidth}{@{}P{2.6cm}YP{4.2cm}@{}}
+\toprule
+\textbf{Role} & \textbf{Who} & \textbf{How the account is created} \\
+\midrule
+\code{patient} & A person receiving care & Self-registration; active immediately \\
+\code{doctor} & A clinician & Self-registration with licence number; \emph{pending} until an admin verifies it, or created by an admin \\
+\code{insurance\_agent} & Claims officer of one insurer & Self-registration with company; \emph{pending} until verified, or created by an admin \\
+\code{admin} & Hospital IT / administration & Only by the seed script or another admin, never by self-registration \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Functional requirements}
+
+\begin{longtable}{@{}P{1.1cm}P{10.2cm}P{2.6cm}@{}}
+\caption{Functional requirements}\label{tab:fr}\\
+\toprule
+\textbf{ID} & \textbf{Requirement} & \textbf{Where} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{ID} & \textbf{Requirement} & \textbf{Where} \\
+\midrule
+\endhead
+\multicolumn{3}{@{}l}{\textit{Accounts and login}}\\
+FR-1 & Patients, doctors and agents can register; doctors and agents start as pending. & Ch.~\ref{ch:auth} \\
+FR-2 & Login takes two factors: password, then a 6-digit code emailed to the user. & Ch.~\ref{ch:auth} \\
+FR-3 & Sessions survive a page reload without storing a token in the browser's storage. & Ch.~\ref{ch:auth}, \ref{ch:frontend} \\
+FR-4 & Logout, password change and account deactivation end sessions immediately. & Ch.~\ref{ch:auth} \\
+FR-5 & Repeated failures lock the account temporarily. & Ch.~\ref{ch:auth} \\
+\multicolumn{3}{@{}l}{\textit{Appointments}}\\
+FR-6 & Patients see doctors' free slots and book one; a slot can never be booked twice. & Ch.~\ref{ch:appointments} \\
+FR-7 & Doctors confirm, complete or mark no-show; patients reschedule; both can cancel. & Ch.~\ref{ch:appointments} \\
+FR-8 & Completing an appointment raises a bill automatically. & Ch.~\ref{ch:billing} \\
+\multicolumn{3}{@{}l}{\textit{Medical records and consent}}\\
+FR-9 & A doctor can read or write a patient's records only with that patient's active, unexpired consent. & Ch.~\ref{ch:records} \\
+FR-10 & Doctors request access; patients approve, deny, grant directly and revoke. & Ch.~\ref{ch:records} \\
+FR-11 & Doctors and admins can use audited emergency (break-glass) access; the patient and admins are notified. & Ch.~\ref{ch:zerotrust}, \ref{ch:records} \\
+FR-12 & Records keep a version history; every change is in the ledger. & Ch.~\ref{ch:records} \\
+FR-13 & Files (PDF, images, text) can be attached; their SHA-256 is recorded; downloads are consent-gated. & Ch.~\ref{ch:records} \\
+\multicolumn{3}{@{}l}{\textit{Prescriptions and vitals}}\\
+FR-14 & Doctors prescribe; patients request refills; doctors approve or deny. & Ch.~\ref{ch:rxvitals} \\
+FR-15 & Registered IoT devices send readings with an API key; patients can add readings manually. & Ch.~\ref{ch:rxvitals} \\
+FR-16 & Out-of-range readings alert the patient and every doctor with consent. & Ch.~\ref{ch:rxvitals} \\
+\multicolumn{3}{@{}l}{\textit{Billing and insurance}}\\
+FR-17 & Patients pay bills or file a claim against their policy. & Ch.~\ref{ch:billing} \\
+FR-18 & Agents move claims through submitted $\to$ under review $\to$ approved/denied $\to$ settled, nothing else. & Ch.~\ref{ch:billing} \\
+FR-19 & Agents see settlements and financial reports for their insurer. & Ch.~\ref{ch:billing} \\
+\multicolumn{3}{@{}l}{\textit{Administration and integrity}}\\
+FR-20 & Admins verify or reject doctors and agents, activate/deactivate users, create staff accounts. & Ch.~\ref{ch:admin} \\
+FR-21 & Admins register IoT devices and see live system statistics. & Ch.~\ref{ch:admin} \\
+FR-22 & Admins can verify the entire ledger and see which documents were tampered with. & Ch.~\ref{ch:ledger} \\
+FR-23 & Every user gets in-app notifications for events that concern them. & Ch.~\ref{ch:admin} \\
+\bottomrule
+\end{longtable}
+
+\section{Non-functional requirements}
+
+\begin{table}[H]
+\centering\small
+\caption{Non-functional requirements}\label{tab:nfr}
+\begin{tabularx}{\textwidth}{@{}P{3.2cm}YP{2.2cm}@{}}
+\toprule
+\textbf{Quality} & \textbf{Requirement and how it is met} & \textbf{Status} \\
+\midrule
+No fake data & Application code never fabricates data; only the seed script inserts demo data. & \stDone \\
+Fail closed & If Redis (OTP, sessions, revocation) is down, protected requests get 503, never a free pass. & \stDone \\
+Fail fast & The server refuses to start with missing or unsafe configuration. & \stDone \\
+Input validation & Every route validates params, query and body with Joi. & \stDone \\
+XSS defence & Strict Content-Security-Policy; all dynamic text escaped; no inline scripts. & \stDone \\
+Test coverage & Backend and frontend test suites; target 90\% backend lines. & \stDone{} (93\%) \\
+Performance & API under 200\,ms, pages under 2\,s (paper \S6.3). & \stPart{} (not load-tested) \\
+Security scan & OWASP ZAP pass against a running instance. & \stNo \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Constraints}
+
+\begin{itemize}
+  \item Single team, academic timeline: infrastructure must be runnable on a
+    laptop (MongoDB, Redis, Node.js) or with one \code{docker compose} command.
+  \item The existing frontend design (HTML/CSS) is kept; it is wired to the API
+    rather than rewritten in another framework (decision D4, Section~\ref{sec:decisions}).
+  \item All configuration and secrets come from environment variables.
+\end{itemize}

@@ -1,0 +1,327 @@
+%% =====================================================================
+\chapter{Frontend}\label{ch:frontend}
+
+\section{Structure}
+
+The frontend is plain HTML, CSS and JavaScript with no build step. The API
+server serves it from \file{frontend\codesl{}}.
+
+\begin{table}[H]
+\centering\small
+\caption{Frontend files}\label{tab:frontend}
+\begin{tabularx}{\textwidth}{@{}P{4cm}Y@{}}
+\toprule
+\textbf{File} & \textbf{Role} \\
+\midrule
+\file{homepage\codedot{}html}, \file{homepagescript\codedot{}js} & Public landing page; live counts from \code{GET \codesl{}api\codesl{}public\codesl{}stats} \\
+\file{login\codedot{}html}, \file{loginscript\codedot{}js} & Sign in (password, then OTP), registration for three roles \\
+\file{patient\codedot{}html}, \file{doctor\codedot{}html}, \file{admin\codedot{}html}, \file{insurance\codedot{}html} & Empty shells: they load the shared scripts and one role script \\
+\file{js\codesl{}api\codedot{}js} & The only code that talks to the server (tokens, refresh, errors) \\
+\file{js\codesl{}ui\codedot{}js} & Escaping, formatting, loading/empty/error states, tables, modals, toasts \\
+\file{js\codesl{}portal\codedot{}js} & Dashboard shell: session restore, sidebar, routing, notifications, profile \\
+\file{js\codesl{}patient\codedot{}js}, \file{doctor\codedot{}js}, \file{admin\codedot{}js}, \file{insurance\codedot{}js} & One function per page of that role's dashboard \\
+\file{css\codesl{}portal\codedot{}css} & Shared design system (light and dark), responsive layout \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+A dashboard shell is only a few lines: it loads two pinned CDN libraries
+(icons and charts) and the four scripts, all with \code{defer}.
+
+\begin{lstlisting}[style=shell,caption={Script tags of \file{frontend/patient.html}}]
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
+<script src="js/api.js" defer></script>
+<script src="js/ui.js" defer></script>
+<script src="js/portal.js" defer></script>
+<script src="js/patient.js" defer></script>
+\end{lstlisting}
+
+\section{The API client: \file{js\codesl{}api\codedot{}js}}
+
+\begin{lstlisting}[language=JavaScript,caption={request with transparent refresh (\file{frontend/js/api.js})}]
+  async function request(method, path, { body, query, form, retry = true } = {}) {
+    // ... build the URL from path + query
+    const headers = {};
+    if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+    if (breakGlassReason) headers['x-break-glass-reason'] = breakGlassReason;
+    // ... JSON body or FormData
+
+    let response;
+    try {
+      response = await fetch(url, { method, headers, body: payload, credentials: 'same-origin' });
+    } catch (networkError) {
+      throw new ApiError(0, 'Cannot reach the MediChain server. Check that it is running.', null);
+    }
+
+    const expired = response.status === 401 && retry && !path.startsWith('/api/auth/');
+    if (expired) {
+      try {
+        await refreshSession();
+      } catch (refreshError) {
+        accessToken = null;
+        throw new ApiError(401, 'Your session has ended. Please log in again.', { code: 'SESSION_ENDED' });
+      }
+      return request(method, path, { body, query, form, retry: false });
+    }
+    return parse(response);
+  }
+\end{lstlisting}
+
+\begin{lstlisting}[language=JavaScript,caption={One shared refresh (\file{frontend/js/api.js})}]
+  function refreshSession() {
+    if (!refreshing) {
+      refreshing = fetch('/api/auth/refresh-token', { method: 'POST', credentials: 'same-origin' })
+        .then(parse)
+        .then((body) => {
+          accessToken = body.data.token;
+          return body.data.user;
+        })
+        .finally(() => { refreshing = null; });
+    }
+    return refreshing;
+  }
+\end{lstlisting}
+
+\begin{howto}
+\begin{itemize}
+  \item \code{accessToken} is a variable inside the module's closure: never in
+    \code{localStorage}, never reachable from other scripts.
+  \item When any call gets a 401 (access token expired after 15 minutes), the
+    client silently refreshes once and retries the call. The user never sees it.
+  \item A dashboard page often makes five calls at once; if all five get 401,
+    \code{refreshing} makes them share \emph{one} refresh request. This matters
+    because refresh tokens rotate: five parallel refreshes would invalidate
+    each other.
+  \item A network failure becomes \code{ApiError} with status 0, which the
+    screens show as ``Server unreachable''.
+  \item While emergency access is switched on, every request carries the
+    \code{x-break-glass-reason} header.
+\end{itemize}
+\end{howto}
+
+\section{The dashboard shell: \file{js\codesl{}portal\codedot{}js}}
+
+\subsection{Start-up}
+
+\begin{lstlisting}[language=JavaScript,caption={Portal.start (\file{frontend/js/portal.js})}]
+  async function start(config) {
+    state.config = config;
+    applyTheme(savedTheme());
+    let user;
+    try {
+      user = await api.refreshSession();
+    } catch (error) {
+      if (error.status === 0) {
+        document.getElementById('app').innerHTML = '<div class="boot-screen"><div class="state state-error"><h4>Server unreachable</h4><div>Start the MediChain API and reload this page.</div></div></div>';
+        return;
+      }
+      sendToLogin();
+      return;
+    }
+    if (user.role !== config.role) {
+      location.replace(DASHBOARDS[user.role]);
+      return;
+    }
+    state.user = user;
+    document.getElementById('app').addEventListener('click', onClick); // one delegated listener for the whole app
+    renderLayout();
+    renderBanners();
+    window.addEventListener('hashchange', () => showPage());
+    await showPage();
+    refreshBadges();
+    state.pollTimer = setInterval(refreshBadges, 20000);
+  }
+\end{lstlisting}
+
+Opening \file{doctor\codedot{}html} while logged in as a patient sends you to
+\file{patient\codedot{}html}. This is a convenience only: the real protection is the
+server's role check on every endpoint.
+
+\subsection{Rendering a page: real loading, empty and error states}
+
+\begin{lstlisting}[language=JavaScript,caption={showPage (\file{frontend/js/portal.js})}]
+  async function showPage(pageId = currentPageId()) {
+    const token = ++state.renderToken;
+    state.page = pageId;
+    state.handlers = {};
+    state.charts.forEach((c) => c.destroy());
+    state.charts = [];
+    // ... highlight the nav item, set the title
+    const container = document.getElementById('page-container');
+    UI.loading(container);
+    const render = state.config.pages[pageId] || SHARED_PAGES[pageId];
+    try {
+      await render(ctx(container, token));
+    } catch (error) {
+      if (token !== state.renderToken) return;
+      if (error.code === 'SESSION_ENDED') return sendToLogin();
+      UI.errorState(container, error, () => showPage(pageId));
+    }
+    if (token === state.renderToken) refreshIcons();
+  }
+\end{lstlisting}
+
+\begin{howto}
+The URL hash (\code{\#appointments}) selects the page. The shell shows a
+loading state, then calls the role script's page function with a context
+object \code{c}. If the function throws (any \code{ApiError}), the shell
+replaces the page with an error state and a \emph{Try again} button. Nothing is
+ever shown from a previous load or a fixture. The \code{renderToken} solves a
+race: if the user clicks another page while the first is still loading, the
+first page's late result is discarded (\code{c.stale()} becomes true).
+\end{howto}
+
+\begin{lstlisting}[language=JavaScript,caption={The error state (\file{frontend/js/ui.js})}]
+  function errorState(container, error, onRetry) {
+    const offline = error && error.status === 0;
+    container.innerHTML = `<div class="state state-error" role="alert">
+      ${icon(offline ? 'wifi-off' : 'alert-triangle')}
+      <h4>${offline ? 'Server unreachable' : 'Could not load this page'}</h4>
+      <div>${esc(error && error.message)}</div>
+      ${onRetry ? '<button class="btn btn-secondary mt-3" data-retry>Try again</button>' : ''}
+    </div>`;
+    if (onRetry) container.querySelector('[data-retry]').addEventListener('click', onRetry);
+    refreshIcons();
+  }
+\end{lstlisting}
+
+\subsection{Escaping: the second line of XSS defence}
+
+\begin{lstlisting}[language=JavaScript,caption={esc (\file{frontend/js/ui.js})}]
+  function esc(value) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+\end{lstlisting}
+
+Pages build HTML with template strings, so \emph{every} value that came from the
+server goes through \code{esc} before insertion. A patient named
+\code{<img src=x onerror=alert(1)>} is displayed as text. A frontend test checks
+this function, and the CSP (Section~\ref{ch:foundation}) blocks inline scripts
+even if an escape were forgotten.
+
+\section{A complete page: the patient's Permissions screen}
+
+Every role page follows the same pattern: fetch in parallel, bail out if stale,
+render, register click handlers.
+
+\begin{lstlisting}[language=JavaScript,caption={Data loading and handlers (\file{frontend/js/patient.js}, abridged)}]
+  async function permissions(c) {
+    const [consents, doctors] = await Promise.all([c.api.get('/api/consents'), c.api.get('/api/doctors')]);
+    if (c.stale()) return;
+    const requested = consents.data.filter((g) => g.status === 'requested');
+    const active = consents.data.filter((g) => g.status === 'active');
+    // ... c.container.innerHTML = cards and tables built from these arrays,
+    //     with buttons like <button data-action="revoke" data-id="...">
+
+    c.on({
+      approve: (el) => UI.modal({ /* choose a duration, then POST /api/consents/:id/approve */ }),
+      deny: (el) => c.act(() => c.api.post(`/api/consents/${el.dataset.id}/deny`)),
+      revoke: async (el) => {
+        if (await UI.confirmDialog('Revoke access', 'The doctor will lose access to your records immediately.', { confirmLabel: 'Revoke', danger: true })) {
+          await c.act(() => c.api.post(`/api/consents/${el.dataset.id}/revoke`));
+        }
+      },
+      // ... grant
+    });
+  }
+\end{lstlisting}
+
+\begin{howto}
+Buttons carry \code{data-action} and \code{data-id} attributes instead of
+\code{onclick} code (which the CSP would block). The shell's single click
+listener finds the nearest \code{[data-action]} element and calls the handler the
+page registered with \code{c.on}. \code{c.act} runs an API call, shows a success
+or error toast with the server's message, reloads the page and refreshes the
+badge counters. Empty lists render through \code{UI.table(..., 'No doctor
+currently has access')}, which shows a real empty state instead of an empty
+table.
+\end{howto}
+
+\section{Login: \file{loginscript\codedot{}js}}
+
+\begin{lstlisting}[language=JavaScript,caption={Two-step sign-in (\file{frontend/loginscript.js}, abridged)}]
+  async function requestCode(button) {
+    setLoading(button, true);
+    try {
+      const res = await api.post('/api/auth/login/request-otp', { email: pending.email, password: pending.password });
+      $('verificationContact').textContent = res.data.email;
+      $('otpMinutes').textContent = res.data.expiresInMinutes;
+      return true;
+    } catch (error) {
+      const remaining = error.body && error.body.attemptsRemaining;
+      setMessage('loginMessage', remaining !== undefined ? `${error.message}. ${remaining} attempt(s) left before the account locks.` : error.message);
+      return false;
+    } finally {
+      setLoading(button, false);
+    }
+  }
+
+  async function onVerify() {
+    const otp = codeInputs().map((i) => i.value).join('');
+    if (!/^\d{6}$/.test(otp)) { setMessage('otpMessage', 'Enter all 6 digits of the code.'); return; }
+    // ...
+      const res = await api.post('/api/auth/login/verify-otp', { email: pending.email, otp });
+      pending.password = '';
+      // ... redirect to the dashboard for res.data.user.role
+  }
+
+  function redirectAfterLogin(role) {
+    const next = new URLSearchParams(location.search).get('next');
+    // Only follow "next" when it points at this user's own dashboard (prevents open redirects).
+    const target = next && next.startsWith(DASHBOARDS[role]) ? next : DASHBOARDS[role];
+    location.replace(target);
+  }
+\end{lstlisting}
+
+The password is kept in memory only between the two steps (so ``resend code''
+works) and cleared as soon as the code is accepted. The six code boxes accept
+typing, pasting a whole code, and backspace across boxes. The registration form
+loads its insurer and department lists from \code{GET \codesl{}api\codesl{}settings\codesl{}public}.
+
+\section{What each dashboard shows}
+
+\begin{longtable}{@{}P{3.4cm}P{10.6cm}@{}}
+\caption{Dashboard pages and their endpoints}\label{tab:pages}\\
+\toprule
+\textbf{Page} & \textbf{Content (endpoints)} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Page} & \textbf{Content (endpoints)} \\
+\midrule
+\endhead
+\multicolumn{2}{@{}l}{\textit{Patient}}\\
+Dashboard & Next appointment, access requests, active medications, latest vitals, unpaid bills (appointments, prescriptions, consents, bills, vitals) \\
+Appointments & Upcoming and history; book with a live slot grid; reschedule; cancel \\
+Medical Records & Records with attachments, upload a document, download, ledger history, Verify integrity \\
+Medications & Active and past prescriptions; request refill \\
+Health Metrics & Charts of the last 7 days of vitals, abnormal-reading warning, registered devices, add a reading \\
+Permissions & Pending requests, active grants, history; approve, deny, grant, revoke \\
+Billing \& Claims & Bills, record payment, file claim, claim timeline \\
+\multicolumn{2}{@{}l}{\textit{Doctor}}\\
+Dashboard & Today's schedule, pending confirmations, refill queue, consent counts \\
+Appointments & Today / Upcoming / Past; confirm, complete (with notes), no-show, cancel \\
+My Patients & Patients with consent status; find by email; request access; patient chart with records, vitals, prescriptions, new record, upload, prescribe \\
+Prescriptions & All prescriptions; approve or deny refills; complete or cancel \\
+IoT Monitoring & Live tiles of each consenting patient's latest vitals, refreshed every 5 s \\
+Emergency access & Header button that switches break-glass on with a reason \\
+\multicolumn{2}{@{}l}{\textit{Admin}}\\
+Dashboard / Reports & Live statistics and charts (\code{\codesl{}api\codesl{}admin\codesl{}stats}) \\
+Verification & Pending doctors and agents; approve or reject \\
+Users & Search, filter, activate/deactivate, create staff \\
+IoT Devices & Registry; register (key shown once); activate/deactivate \\
+Hospital Settings & Name, contacts, booking window, consent duration, insurers, departments \\
+Ledger & Chain statistics, browse blocks, Verify ledger \\
+Access Control & The access chain: allow/deny decisions, break-glass uses \\
+\multicolumn{2}{@{}l}{\textit{Insurance agent}}\\
+Dashboard & Queue size, amounts, approval rate \\
+Claims Queue & Filter by status; process a claim through the state machine \\
+Settlements, Reports & Settled claims; monthly and status aggregates with charts \\
+\multicolumn{2}{@{}l}{\textit{All roles}}\\
+Notifications & List, mark read, jump to the related page \\
+Profile \& Security & Edit profile (and availability for doctors), change password, current trust score with its reasons \\
+\bottomrule
+\end{longtable}
