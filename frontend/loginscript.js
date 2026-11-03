@@ -6,10 +6,11 @@
  * Then the browser goes to the user's dashboard, which restores the session
  * from the cookie. Registration uses POST /api/auth/register.
  *
- * Second visit: on load the page asks POST /api/auth/route (the dynamic router).
- * An unknown browser gets the normal form above. A browser that completed the full
- * login before is either sent straight to the page the server picked for this
- * user, or shown a short "welcome back" form that needs only the password.
+ * After the first login every sign-in goes through the dynamic login algorithm
+ * (POST /api/auth/login/dynamic): the server scores location (IP vs GPS), device,
+ * time and network and asks for the password only, the password + emailed code, or
+ * the password + code + security question. On load the page asks POST /api/auth/route,
+ * which can send a trusted, low-risk browser straight to the user's landing page.
  */
 (function loginPage() {
   const api = window.MediApi;
@@ -21,7 +22,7 @@
   };
 
   const $ = (id) => document.getElementById(id);
-  const forms = ['loginForm', 'returningForm', 'twoStepVerification', 'roleSelection', 'registerForm'];
+  const forms = ['loginForm', 'returningForm', 'challengeForm', 'twoStepVerification', 'roleSelection', 'registerForm'];
   // Held only in memory between step 1 and step 2 (needed for "resend"), wiped after sign-in.
   const pending = { email: '', password: '' };
   let resendTimer = null;
@@ -70,14 +71,52 @@
     location.replace(target);
   }
 
-  /* ---------------------------------------------------------------- dynamic routing */
+  /* ---------------------------------------------------------------- dynamic login */
 
   /**
-   * Asks the server what this browser should see. Returns true when the page has
-   * been taken care of (redirect or welcome-back form), false for a first visit.
+   * The browser's position for the context check, or null if the user declines or
+   * the browser cannot tell within a few seconds. Asked once per page load.
    */
+  let gpsPromise = null;
+  function getGps() {
+    if (!gpsPromise) {
+      gpsPromise = new Promise((resolve) => {
+        if (!navigator.geolocation) { resolve(null); return; }
+        navigator.geolocation.getCurrentPosition(
+          (p) => resolve({ lat: p.coords.latitude, lon: p.coords.longitude, accuracy: p.coords.accuracy }),
+          () => resolve(null),
+          { timeout: 5000, maximumAge: 60000 },
+        );
+      });
+    }
+    return gpsPromise;
+  }
+  const context = async () => ({ gps: await getGps() });
+
+  const RISK_TEXT = { low: 'Low risk: password only', medium: 'Medium risk: password + emailed code', high: 'High risk: password + code + security question' };
+  const RISK_COLOUR = { low: '#059669', medium: '#d97706', high: '#dc2626' };
+
+  /** Draws the trust score and its four parts (location, device, time, network). */
+  function renderRisk(elementId, a) {
+    const row = (label, part, extra = '') => `
+      <div class="risk-row"><span>${label}</span>
+        <div class="risk-track"><div class="risk-fill" style="width:${(part.score / part.max) * 100}%"></div></div>
+        <strong>${part.score}/${part.max}</strong></div>
+      <div class="risk-note">${esc(part.category)}${extra}</div>`;
+    const loc = a.breakdown.location;
+    $(elementId).innerHTML = `
+      <div class="risk-head"><span class="risk-score" style="color:${RISK_COLOUR[a.risk]}">${a.score}</span>
+        <span class="risk-badge" style="border-color:${RISK_COLOUR[a.risk]};color:${RISK_COLOUR[a.risk]}">${RISK_TEXT[a.risk]}</span></div>
+      ${row('Location', loc, loc.distanceKm !== null ? ` · ${loc.distanceKm} km between IP and GPS` : '')}
+      ${row('Device', a.breakdown.device)}
+      ${row('Time', a.breakdown.time)}
+      ${row('Network', a.breakdown.network)}`;
+  }
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  /** Asks the server what this browser should see when the page opens. */
   async function resolveRoute() {
-    const { data } = await api.post('/api/auth/route');
+    const { data } = await api.post('/api/auth/route', { context: await context() });
     if (data.mode === 'redirect') {
       api.setToken(data.token);
       redirectAfterLogin(data.user.role, data.landing);
@@ -86,10 +125,58 @@
     if (data.mode === 'returning') {
       $('returningName').textContent = data.firstName;
       $('returningEmail').textContent = data.emailHint;
+      renderRisk('returningRisk', data.assessment);
       showForm('returningForm');
       return true;
     }
     return false;
+  }
+
+  let challengeId = null;
+
+  /** Acts on the server's answer to a dynamic login: sign in, normal code step, or challenge. */
+  function handleLoginResult(res, password) {
+    const { data } = res;
+    if (data.mode === 'redirect') {
+      pending.password = '';
+      api.setToken(data.token);
+      notify(`Welcome back, ${data.user.fullName}. ${data.landing.reason}.`);
+      setTimeout(() => redirectAfterLogin(data.user.role, data.landing), 600);
+    } else if (data.mode === 'otp') {
+      // First login after registration: the normal password + code flow.
+      pending.email = data.email;
+      pending.password = password;
+      $('verificationContact').textContent = data.email;
+      $('otpMinutes').textContent = data.expiresInMinutes;
+      showForm('twoStepVerification');
+      clearCode();
+      startResendTimer();
+      notify('Code sent. Check your email.', 'info');
+    } else if (data.mode === 'challenge') {
+      challengeId = data.challengeId;
+      renderRisk('challengeRisk', data.assessment);
+      $('challengeEmail').textContent = data.email;
+      $('challengeOtp').value = '';
+      $('challengeQuestionBlock').style.display = data.securityQuestion ? '' : 'none';
+      $('challengeQuestion').textContent = data.securityQuestion || '';
+      $('challengeAnswer').value = '';
+      $('challengeAnswer').required = Boolean(data.securityQuestion);
+      setMessage('challengeMessage', '');
+      showForm('challengeForm');
+      notify(res.message, 'info');
+    }
+  }
+
+  async function submitDynamic(button, messageId, body) {
+    setLoading(button, true);
+    try {
+      handleLoginResult(await api.post('/api/auth/login/dynamic', { ...body, context: await context() }), body.password);
+    } catch (error) {
+      const remaining = error.body && error.body.attemptsRemaining;
+      setMessage(messageId, remaining !== undefined ? `${error.message}. ${remaining} attempt(s) left before the account locks.` : error.message);
+    } finally {
+      setLoading(button, false);
+    }
   }
 
   async function onQuickLogin(event) {
@@ -97,29 +184,23 @@
     setMessage('returningMessage', '');
     const password = $('returningPassword').value;
     if (!password) { setMessage('returningMessage', 'Enter your password.'); return; }
-    const button = $('returningSubmitBtn');
+    await submitDynamic($('returningSubmitBtn'), 'returningMessage', { password });
+  }
+
+  async function onChallenge(event) {
+    event.preventDefault();
+    const otp = $('challengeOtp').value.trim();
+    if (!/^\d{6}$/.test(otp)) { setMessage('challengeMessage', 'Enter the 6-digit code from your email.'); return; }
+    const body = { challengeId, otp };
+    if ($('challengeAnswer').required) body.securityAnswer = $('challengeAnswer').value;
+    const button = $('challengeSubmitBtn');
     setLoading(button, true);
     try {
-      const res = await api.post('/api/auth/login/quick', { password });
-      if (res.data.mode === 'otp') {
-        // Something looked risky (e.g. a recent failed attempt): fall back to the emailed code.
-        pending.email = res.data.email;
-        pending.password = password;
-        $('verificationContact').textContent = res.data.email;
-        $('otpMinutes').textContent = res.data.expiresInMinutes;
-        showForm('twoStepVerification');
-        clearCode();
-        startResendTimer();
-        notify(res.message, 'info');
-        return;
-      }
-      api.setToken(res.data.token);
-      notify(`Welcome back, ${res.data.user.fullName}. ${res.data.landing.reason}.`);
-      setTimeout(() => redirectAfterLogin(res.data.user.role, res.data.landing), 600);
+      handleLoginResult(await api.post('/api/auth/login/challenge', body));
     } catch (error) {
-      if (error.code === 'DEVICE_UNKNOWN') { showForm('loginForm'); setMessage('loginMessage', error.message); return; }
+      if (error.code === 'CHALLENGE_EXPIRED') { showForm('loginForm'); setMessage('loginMessage', error.message); return; }
       const remaining = error.body && error.body.attemptsRemaining;
-      setMessage('returningMessage', remaining !== undefined ? `${error.message}. ${remaining} attempt(s) left before the account locks.` : error.message);
+      setMessage('challengeMessage', remaining !== undefined ? `${error.message}. ${remaining} attempt(s) left.` : error.message);
     } finally {
       setLoading(button, false);
     }
@@ -149,14 +230,8 @@
     const form = $('loginForm');
     if (!form.checkValidity()) { form.reportValidity(); return; }
     pending.email = $('loginEmail').value.trim().toLowerCase();
-    pending.password = $('loginPassword').value;
-    if (await requestCode($('loginSubmitBtn'))) {
-      showForm('twoStepVerification');
-      clearCode();
-      startResendTimer();
-      setMessage('otpMessage', '');
-      notify('Code sent. Check your email.', 'info');
-    }
+    // The server applies the normal flow on the first login and the dynamic algorithm afterwards.
+    await submitDynamic($('loginSubmitBtn'), 'loginMessage', { email: pending.email, password: $('loginPassword').value });
   }
 
   function codeInputs() { return Array.from(document.querySelectorAll('.code-input')); }
@@ -325,6 +400,8 @@
 
     $('loginForm').addEventListener('submit', onLogin);
     $('returningForm').addEventListener('submit', onQuickLogin);
+    $('challengeForm').addEventListener('submit', onChallenge);
+    $('challengeBackBtn').addEventListener('click', () => { challengeId = null; showForm('loginForm'); });
     $('notMeBtn').addEventListener('click', () => showForm('loginForm'));
     $('verifyCodeBtn').addEventListener('click', onVerify);
     $('resendCodeBtn').addEventListener('click', async () => {

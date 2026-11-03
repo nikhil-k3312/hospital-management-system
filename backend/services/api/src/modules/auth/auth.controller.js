@@ -6,6 +6,10 @@ const ledgerService = require('../../services/ledgerService');
 const notificationService = require('../../services/notificationService');
 const deviceService = require('../../services/deviceService');
 const routingService = require('../../services/routingService');
+const contextService = require('../../services/contextService');
+const redisClient = require('../../db/redis');
+const crypto = require('crypto');
+const { sha256 } = require('../../utils/hash');
 const { invalidateSession } = require('../../middleware/auth');
 const config = require('../../config/config');
 const logger = require('../../utils/logger');
@@ -72,6 +76,8 @@ async function register(req, res) {
     gender: gender || '',
     address,
     approvalStatus: needsApproval ? 'pending' : 'approved',
+    securityQuestion: req.body.securityQuestion || '',
+    securityAnswerHash: req.body.securityAnswer || '', // hashed by the pre-save hook
   });
 
   if (role === 'patient') {
@@ -183,6 +189,7 @@ async function verifyOtp(req, res) {
   user.lastLogin = new Date();
   user.isVerified = true;
   user.loginCount += 1;
+  contextService.rememberNetwork(user, contextService.assess({ req, user, deviceKnown: false }));
   await user.save({ validateBeforeSave: false });
   await invalidateSession(user._id);
 
@@ -205,19 +212,68 @@ function maskEmail(email) {
   return `${name.charAt(0)}${'*'.repeat(Math.max(1, name.length - 1))}@${domain}`;
 }
 
+const CHALLENGE_TTL_SECONDS = 10 * 60;
+const challengeKey = (id) => `login:challenge:${id}`;
+
+/** Writes the dynamic-login decision to the "access" chain of the ledger (no raw IP or coordinates). */
+function auditContext(req, user, assessment, decision, reason) {
+  return ledgerService.append({
+    chain: 'access',
+    entityType: 'login_context',
+    entityId: user._id,
+    action: decision === 'allow' ? 'ALLOW' : decision === 'deny' ? 'DENY' : 'CHALLENGE',
+    actorId: user._id,
+    actorRole: user.role,
+    meta: {
+      reason,
+      trustScore: assessment.score,
+      risk: assessment.risk,
+      factors: assessment.factors,
+      location: assessment.breakdown.location.category,
+      distanceKm: assessment.breakdown.location.distanceKm,
+      device: assessment.breakdown.device.category,
+      time: assessment.breakdown.time.category,
+      network: assessment.breakdown.network.category,
+      ipHash: assessment.ipHash,
+      userAgentHash: sha256(req.get('user-agent') || ''),
+    },
+  }).catch((error) => logger.error(`Login audit failed: ${error.message}`));
+}
+
+/** Public part of an assessment: what the login page shows the user. */
+const publicAssessment = (a) => ({ score: a.score, risk: a.risk, tier: a.tier, factors: a.factors, breakdown: a.breakdown });
+
+/** Signs the user in after the dynamic login: session, trusted device, known network, landing page. */
+async function completeDynamicLogin(req, res, user, assessment, deviceKnown) {
+  user.failedLoginAttempts = 0;
+  user.accountLockedUntil = null;
+  user.lastLogin = new Date();
+  user.loginCount += 1;
+  contextService.rememberNetwork(user, assessment);
+  await user.save({ validateBeforeSave: false });
+  await invalidateSession(user._id);
+  const access = await issueSession(res, user);
+  if (!deviceKnown) await deviceService.trust(req, res, user); // the extra factors just proved this browser
+  const landing = await routingService.resolveLanding(user);
+  await auditContext(req, user, assessment, 'allow', 'dynamic_login_success');
+  logger.info(`Dynamic login: ${user.email} score ${assessment.score} (${assessment.risk} risk)`);
+  return { mode: 'redirect', landing, token: access.token, user: user.toJSON(), assessment: publicAssessment(assessment) };
+}
+
 /**
- * POST /api/auth/route: the dynamic router the login page calls on load.
- *   unknown browser               -> { mode: 'login' }      normal first-time login form
- *   trusted browser, live session -> { mode: 'redirect' }   straight to the computed landing page
- *   trusted browser, no session   -> { mode: 'returning' }  "welcome back", password only
+ * POST /api/auth/route: called by the login page as soon as it loads.
+ *   unknown browser                          -> { mode: 'login' }      normal sign-in / sign-up page
+ *   trusted browser, live session, low risk  -> { mode: 'redirect' }   straight to the computed landing page
+ *   trusted browser otherwise                -> { mode: 'returning' }  "welcome back" + the factors this context needs
  */
 async function route(req, res) {
   const known = await deviceService.recognise(req);
   if (!known) return res.json({ success: true, data: { mode: 'login' } });
   const { user } = known;
+  const assessment = contextService.assess({ req, user, deviceKnown: true, gps: req.body.context?.gps });
 
   const presented = req.cookies?.[REFRESH_COOKIE];
-  if (presented) {
+  if (presented && assessment.risk === 'low') {
     try {
       const decoded = await tokenService.verifyRefreshToken(presented);
       if (decoded.userId === user._id.toString()) {
@@ -225,7 +281,8 @@ async function route(req, res) {
         await User.updateOne({ _id: user._id }, { $pull: { refreshTokens: tokenService.hashJTI(decoded.jti) } });
         const access = await issueSession(res, user);
         const landing = await routingService.resolveLanding(user);
-        return res.json({ success: true, data: { mode: 'redirect', landing, token: access.token, user: user.toJSON() } });
+        await auditContext(req, user, assessment, 'allow', 'session_resumed_low_risk');
+        return res.json({ success: true, data: { mode: 'redirect', landing, token: access.token, user: user.toJSON(), assessment: publicAssessment(assessment) } });
       }
     } catch (error) {
       if (error.message === 'REDIS_UNAVAILABLE') throw error;
@@ -235,20 +292,27 @@ async function route(req, res) {
 
   res.json({
     success: true,
-    data: { mode: 'returning', firstName: user.fullName.split(' ')[0], emailHint: maskEmail(user.email), role: user.role },
+    data: {
+      mode: 'returning', firstName: user.fullName.split(' ')[0], emailHint: maskEmail(user.email), role: user.role,
+      assessment: publicAssessment(assessment),
+    },
   });
 }
 
 /**
- * POST /api/auth/login/quick: second-time login on a trusted browser, password only.
- * Adaptive: if anything looks risky (recent failures), the emailed code is still required.
+ * POST /api/auth/login/dynamic: every login after the first one.
+ *   1. identify the account (trusted-browser cookie, or the email typed in) and check the password
+ *   2. first login after registration -> the normal flow: emailed code via /login/verify-otp
+ *   3. otherwise score the context: low risk signs in now; medium and high risk get a
+ *      challenge (emailed code, plus the security question at high risk)
  */
-async function quickLogin(req, res) {
+async function dynamicLogin(req, res) {
   const known = await deviceService.recognise(req);
-  if (!known) throw unauthorized('This browser is not recognised. Use the full sign-in.', 'DEVICE_UNKNOWN');
-  const { user } = known;
-
+  let user = req.body.email ? await User.findOne({ email: req.body.email }) : known?.user;
+  if (!user) throw unauthorized(INVALID_CREDENTIALS, 'INVALID_CREDENTIALS');
   if (user.isAccountLocked()) throw forbidden('Account is locked after too many failed attempts. Try again later.', 'ACCOUNT_LOCKED');
+  if (!user.isActive) throw forbidden('Account is deactivated. Contact the hospital administrator.', 'ACCOUNT_DEACTIVATED');
+
   if (!(await user.comparePassword(req.body.password))) {
     const failed = await recordFailedAttempt(user);
     return res.status(401).json({
@@ -256,22 +320,76 @@ async function quickLogin(req, res) {
       attemptsRemaining: Math.max(0, config.security.maxFailedLogins - failed),
     });
   }
+  if (await otpService.getAttempts(user.email) >= config.otp.maxAttempts) throw tooMany('Too many OTP requests. Try again in 15 minutes.');
 
-  if (user.failedLoginAttempts > 0) {
+  const sendCode = async () => {
     const otp = otpService.generateOTP();
     await otpService.storeOTP(user.email, otp);
     await emailService.sendOTP(user.email, otp, user.fullName);
     await otpService.incrementAttempts(user.email);
-    return res.json({ success: true, message: 'For your security, enter the code sent to your email', data: { mode: 'otp', email: user.email, expiresInMinutes: config.otp.expiryMinutes } });
+  };
+
+  // First login after registration: the normal sign-in, password then emailed code.
+  if (user.loginCount === 0) {
+    await sendCode();
+    return res.json({ success: true, message: 'A login code was sent to your email', data: { mode: 'otp', email: user.email, expiresInMinutes: config.otp.expiryMinutes } });
   }
 
-  user.lastLogin = new Date();
-  user.loginCount += 1;
-  await user.save({ validateBeforeSave: false });
-  const access = await issueSession(res, user);
-  const landing = await routingService.resolveLanding(user);
-  logger.info(`Quick login on trusted device: ${user.email}`);
-  res.json({ success: true, message: 'Welcome back', data: { mode: 'redirect', landing, token: access.token, user: user.toJSON() } });
+  const deviceKnown = Boolean(known && known.user._id.equals(user._id));
+  user = await User.findById(user._id); // fresh copy (recordFailedAttempt may have run earlier)
+  const assessment = contextService.assess({ req, user, deviceKnown, gps: req.body.context?.gps });
+
+  if (assessment.risk === 'low') {
+    return res.json({ success: true, message: 'Welcome back', data: await completeDynamicLogin(req, res, user, assessment, deviceKnown) });
+  }
+
+  await sendCode();
+  const challengeId = crypto.randomBytes(24).toString('hex');
+  await redisClient.setEx(challengeKey(challengeId), CHALLENGE_TTL_SECONDS, JSON.stringify({
+    userId: user._id.toString(), factors: assessment.factors, deviceKnown, assessment,
+  }));
+  await auditContext(req, user, assessment, 'challenge', `${assessment.risk}_risk_step_up`);
+
+  res.json({
+    success: true,
+    message: assessment.factors.includes('security_question')
+      ? 'Unusual sign-in: enter the emailed code and answer your security question'
+      : 'Enter the code sent to your email to finish signing in',
+    data: {
+      mode: 'challenge', challengeId, email: user.email, expiresInMinutes: config.otp.expiryMinutes,
+      securityQuestion: assessment.factors.includes('security_question') ? user.securityQuestion : null,
+      assessment: publicAssessment(assessment),
+    },
+  });
+}
+
+/** POST /api/auth/login/challenge: the extra factors the context assessment asked for. */
+async function verifyChallenge(req, res) {
+  const raw = await redisClient.get(challengeKey(req.body.challengeId));
+  if (!raw) throw unauthorized('This sign-in attempt has expired. Start again.', 'CHALLENGE_EXPIRED');
+  const challenge = JSON.parse(raw);
+  const user = await User.findById(challenge.userId);
+  if (!user || !user.isActive) throw unauthorized('Account unavailable', 'ACCOUNT_DEACTIVATED');
+  if (user.isAccountLocked()) throw forbidden('Account is locked after too many failed attempts. Try again later.', 'ACCOUNT_LOCKED');
+
+  const fail = async (message, code) => {
+    const failed = await recordFailedAttempt(user);
+    await auditContext(req, user, challenge.assessment, 'deny', code.toLowerCase());
+    return res.status(401).json({ success: false, message, code, attemptsRemaining: Math.max(0, config.security.maxFailedLogins - failed) });
+  };
+
+  const otpResult = await otpService.verifyOTP(user.email, req.body.otp);
+  if (!otpResult.success) {
+    await otpService.incrementAttempts(user.email);
+    return fail(otpResult.message, 'INVALID_OTP');
+  }
+  if (challenge.factors.includes('security_question') && !(await user.compareSecurityAnswer(req.body.securityAnswer))) {
+    return fail('The security answer is not correct', 'INVALID_SECURITY_ANSWER');
+  }
+
+  await redisClient.del(challengeKey(req.body.challengeId));
+  await otpService.clearAttempts(user.email);
+  res.json({ success: true, message: 'Login successful', data: await completeDynamicLogin(req, res, user, challenge.assessment, challenge.deviceKnown) });
 }
 
 /**
@@ -358,4 +476,4 @@ async function changePassword(req, res) {
   res.json({ success: true, message: 'Password changed. Please log in again on all devices.' });
 }
 
-module.exports = { register, requestOtp, verifyOtp, route, quickLogin, refreshToken, logout, changePassword, REFRESH_COOKIE };
+module.exports = { register, requestOtp, verifyOtp, route, dynamicLogin, verifyChallenge, refreshToken, logout, changePassword, REFRESH_COOKIE };

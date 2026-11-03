@@ -2202,3 +2202,14 @@ body.dark-mode .form-message[data-type="success"] { background: #064e3b; color: 
 .loading-spinner { vertical-align: middle; }
 .text-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .role-grid { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+
+/* Dynamic login: trust score panel */
+.risk-panel:empty { display: none; }
+.risk-panel { margin: 0 0 1rem; padding: 0.9rem 1rem; border: 1px solid var(--border-primary, #334155); border-radius: 12px; font-size: 0.82rem; }
+.risk-head { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }
+.risk-score { font-size: 2rem; font-weight: 800; line-height: 1; }
+.risk-badge { border: 1px solid; border-radius: 99px; padding: 0.15rem 0.6rem; font-weight: 600; font-size: 0.75rem; }
+.risk-row { display: grid; grid-template-columns: 70px 1fr 48px; gap: 0.5rem; align-items: center; margin-top: 0.35rem; }
+.risk-track { height: 8px; border-radius: 4px; background: rgba(148, 163, 184, 0.25); overflow: hidden; }
+.risk-fill { height: 100%; border-radius: 4px; background: #14b8a6; }
+.risk-note { margin-left: 78px; opacity: 0.75; font-size: 0.75rem; }

@@ -78,6 +78,15 @@ const userSchema = new mongoose.Schema({
     default: [],
   },
   loginCount: { type: Number, default: 0 },
+  // Third factor for high-risk dynamic logins. The answer is stored as a bcrypt hash
+  // (set the plain answer here; the pre-save hook hashes it, like the password).
+  securityQuestion: { type: String, default: '' },
+  securityAnswerHash: { type: String, default: '' },
+  // Networks (IPv4 /24, IPv6 /48) this user signed in from, as SHA-256 hashes only.
+  knownNetworks: {
+    type: [{ _id: false, prefixHash: { type: String, required: true }, lastSeenAt: { type: Date, default: Date.now } }],
+    default: [],
+  },
 }, { timestamps: true });
 
 userSchema.index({ role: 1, approvalStatus: 1 });
@@ -91,11 +100,24 @@ userSchema.pre('save', async function hashPasswordAndAssignLedgerAddress(next) {
       const salt = await bcrypt.genSalt(10);
       this.passwordHash = await bcrypt.hash(this.passwordHash, salt);
     }
+    if (this.isModified('securityAnswerHash') && this.securityAnswerHash) {
+      // Answers are compared case- and space-insensitively.
+      this.securityAnswerHash = await bcrypt.hash(normaliseAnswer(this.securityAnswerHash), 10);
+    }
     next();
   } catch (error) {
     next(error);
   }
 });
+
+function normaliseAnswer(answer) {
+  return String(answer).trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+userSchema.methods.compareSecurityAnswer = function compareSecurityAnswer(candidate) {
+  if (!this.securityAnswerHash) return Promise.resolve(false);
+  return bcrypt.compare(normaliseAnswer(candidate || ''), this.securityAnswerHash);
+};
 
 userSchema.methods.comparePassword = function comparePassword(candidate) {
   return bcrypt.compare(candidate, this.passwordHash);
@@ -112,6 +134,8 @@ userSchema.methods.toJSON = function toJSON() {
   delete obj.accountLockedUntil;
   delete obj.refreshTokens;
   delete obj.trustedDevices;
+  delete obj.securityAnswerHash;
+  delete obj.knownNetworks;
   delete obj.__v;
   // Hide the other roles' (empty) profile sections. When a partial populate did
   // not select `role`, keep whatever profile fields were explicitly selected.

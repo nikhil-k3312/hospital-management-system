@@ -77,7 +77,11 @@ async function chainEvent(entityType, entity, action, actor = system, meta) {
 }
 
 async function createUser(fields, profile = {}) {
-  const user = new User({ passwordHash: demoPassword, isVerified: true, approvalStatus: 'approved', ...fields });
+  // Demo accounts share one security question for the high-risk step of the dynamic login.
+  const user = new User({
+    passwordHash: demoPassword, isVerified: true, approvalStatus: 'approved',
+    securityQuestion: 'In which city were you born?', securityAnswerHash: 'Bengaluru', ...fields,
+  });
   Object.entries(profile).forEach(([key, value]) => Object.assign(user[key], value));
   await user.save();
   await ledgerService.append({

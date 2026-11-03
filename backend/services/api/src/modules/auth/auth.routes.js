@@ -30,7 +30,15 @@ const registerSchema = Joi.object({
   // insurance agent
   company: Joi.when('role', { is: 'insurance_agent', then: Joi.string().trim().max(100).required(), otherwise: Joi.forbidden() }),
   employeeId: Joi.string().trim().max(60).allow(''),
-});
+  // security question for high-risk logins (the registration page asks for both)
+  securityQuestion: Joi.string().trim().min(5).max(200),
+  securityAnswer: Joi.string().trim().min(2).max(100),
+}).and('securityQuestion', 'securityAnswer'); // both or neither
+
+// Browser context for the dynamic login. Only a position is accepted; the IP is read by the server.
+const context = Joi.object({
+  gps: Joi.object({ lat: Joi.number().min(-90).max(90).required(), lon: Joi.number().min(-180).max(180).required(), accuracy: Joi.number().min(0) }).allow(null),
+}).default({});
 
 router.post('/register', validate({ body: registerSchema }), asyncHandler(controller.register));
 
@@ -42,10 +50,19 @@ router.post('/login/verify-otp',
   validate({ body: Joi.object({ email, otp: Joi.string().pattern(/^\d{4,8}$/).required().messages({ 'string.pattern.base': 'OTP must be digits only' }) }) }),
   asyncHandler(controller.verifyOtp));
 
-router.post('/route', asyncHandler(controller.route));
-router.post('/login/quick',
-  validate({ body: Joi.object({ password: Joi.string().max(128).required() }) }),
-  asyncHandler(controller.quickLogin));
+router.post('/route', validate({ body: Joi.object({ context }) }), asyncHandler(controller.route));
+
+// Dynamic login: password first, then whatever the context assessment requires.
+router.post('/login/dynamic',
+  validate({ body: Joi.object({ email: Joi.string().email().lowercase().trim().max(254), password: Joi.string().max(128).required(), context }) }),
+  asyncHandler(controller.dynamicLogin));
+router.post('/login/challenge',
+  validate({ body: Joi.object({
+    challengeId: Joi.string().hex().length(48).required(),
+    otp: Joi.string().pattern(/^\d{4,8}$/).required(),
+    securityAnswer: Joi.string().trim().max(100),
+  }) }),
+  asyncHandler(controller.verifyChallenge));
 router.post('/refresh-token', asyncHandler(controller.refreshToken));
 router.post('/logout', authenticate, asyncHandler(controller.logout));
 router.post('/change-password', authenticate,

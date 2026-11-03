@@ -81,6 +81,7 @@
                         <h2 id="returning-heading">Welcome back, <span id="returningName"></span></h2>
                         <p>This browser is recognised as <strong id="returningEmail"></strong>. Enter your password to continue.</p>
                     </div>
+                    <div class="risk-panel" id="returningRisk" aria-live="polite"></div>
                     <div class="form-group">
                         <label for="returningPassword" class="required">Password</label>
                         <div class="input-wrapper">
@@ -95,6 +96,35 @@
                     </div>
                     <div class="resend-section">
                         <button type="button" id="notMeBtn" class="text-btn">Not you? <strong>Use another account</strong></button>
+                    </div>
+                </form>
+
+                <!-- Dynamic login: extra factors asked for by the context assessment -->
+                <form id="challengeForm" class="auth-form" aria-labelledby="challenge-heading" novalidate>
+                    <button type="button" id="challengeBackBtn" class="back-btn"><i data-lucide="arrow-left" aria-hidden="true"></i> Back to sign in</button>
+                    <div class="form-header">
+                        <div class="header-icon"><i data-lucide="shield-alert" aria-hidden="true"></i></div>
+                        <h2 id="challenge-heading">Confirm it is you</h2>
+                        <p>We checked where and how you are signing in. A code was sent to <strong id="challengeEmail"></strong>.</p>
+                    </div>
+                    <div class="risk-panel" id="challengeRisk" aria-live="polite"></div>
+                    <div class="form-group">
+                        <label for="challengeOtp" class="required">Emailed code</label>
+                        <div class="input-wrapper">
+                            <i class="input-icon" data-lucide="mail" aria-hidden="true"></i>
+                            <input type="text" id="challengeOtp" class="form-input" inputmode="numeric" maxlength="6" placeholder="6-digit code" autocomplete="one-time-code" required>
+                        </div>
+                    </div>
+                    <div class="form-group" id="challengeQuestionBlock">
+                        <label for="challengeAnswer" class="required" id="challengeQuestion"></label>
+                        <div class="input-wrapper">
+                            <i class="input-icon" data-lucide="key-round" aria-hidden="true"></i>
+                            <input type="text" id="challengeAnswer" class="form-input" maxlength="100" placeholder="Your answer" autocomplete="off">
+                        </div>
+                    </div>
+                    <div class="form-message" id="challengeMessage" role="alert"></div>
+                    <div class="form-group">
+                        <button type="submit" id="challengeSubmitBtn" class="submit-btn"><span>Verify and sign in</span><div class="loading-spinner" aria-hidden="true"></div><i data-lucide="check" aria-hidden="true"></i></button>
                     </div>
                 </form>
 
@@ -189,6 +219,15 @@
                         <small class="description">8+ characters with upper case, lower case, a number and a symbol</small>
                     </div>
                     <div class="form-group"><label for="regConfirm" class="required">Confirm password</label><input type="password" id="regConfirm" class="form-input" required autocomplete="new-password"></div>
+                    <div class="form-group"><label for="regSecQ" class="required">Security question (asked when a sign-in looks unusual)</label>
+                        <select id="regSecQ" name="securityQuestion" class="form-input" required>
+                            <option value="">Choose a question</option>
+                            <option>In which city were you born?</option>
+                            <option>What was the name of your first school?</option>
+                            <option>What is your mother's maiden name?</option>
+                            <option>What was the name of your first pet?</option>
+                        </select></div>
+                    <div class="form-group"><label for="regSecA" class="required">Answer</label><input type="text" id="regSecA" name="securityAnswer" class="form-input" required minlength="2" maxlength="100" autocomplete="off"></div>
                     <div class="form-message" id="registerMessage" role="alert"></div>
                     <div class="form-group">
                         <button type="submit" id="registerSubmitBtn" class="submit-btn"><span>Create account</span><div class="loading-spinner" aria-hidden="true"></div><i data-lucide="user-plus" aria-hidden="true"></i></button>

@@ -95,6 +95,14 @@ const config = {
     trustDays: toInt(env.TRUSTED_DEVICE_DAYS, 30),
   },
 
+  // Dynamic (context-aware) login used from the second login on.
+  context: {
+    hospitalNetworks: (env.HOSPITAL_NETWORKS || '').split(',').map((c) => c.trim()).filter(Boolean), // CIDR list
+    timezone: env.HOSPITAL_TIMEZONE || 'Asia/Kolkata',
+    dutyStartHour: toInt(env.DUTY_START_HOUR, 8),
+    dutyEndHour: toInt(env.DUTY_END_HOUR, 20),
+  },
+
   frontendDir: path.resolve(__dirname, '../../../../../frontend'),
 };
 
