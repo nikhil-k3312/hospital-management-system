@@ -42,6 +42,10 @@ router.post('/login/verify-otp',
   validate({ body: Joi.object({ email, otp: Joi.string().pattern(/^\d{4,8}$/).required().messages({ 'string.pattern.base': 'OTP must be digits only' }) }) }),
   asyncHandler(controller.verifyOtp));
 
+router.post('/route', asyncHandler(controller.route));
+router.post('/login/quick',
+  validate({ body: Joi.object({ password: Joi.string().max(128).required() }) }),
+  asyncHandler(controller.quickLogin));
 router.post('/refresh-token', asyncHandler(controller.refreshToken));
 router.post('/logout', authenticate, asyncHandler(controller.logout));
 router.post('/change-password', authenticate,

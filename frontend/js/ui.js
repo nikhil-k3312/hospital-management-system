@@ -4,6 +4,13 @@
  */
 (function initUi(global) {
   /** Escapes text before it is put into innerHTML: the main defence against XSS from data. */
+  /** "IPFS · bafy...k2 · on blockchain" for an attachment: where it is stored and whether its hash is anchored. */
+  function storageLine(a) {
+    const where = a.storage === 'ipfs' ? `IPFS (encrypted) · CID <span class="mono">${esc(shortHash(a.cid || '', 14))}</span>` : 'Database storage';
+    const chain = a.chain && a.chain.status === 'anchored' ? ' · hash on blockchain' : a.chain && a.chain.status === 'pending' ? ' · blockchain anchor pending' : '';
+    return where + chain;
+  }
+
   function esc(value) {
     return String(value ?? '')
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -229,7 +236,7 @@
   }
 
   const ui = {
-    esc, fmtDate, fmtTime, fmtDateTime, fmtMoney, relTime, age, initials, titleCase, shortHash, isoDate,
+    esc, fmtDate, fmtTime, fmtDateTime, fmtMoney, relTime, age, initials, titleCase, shortHash, isoDate, storageLine,
     tag, icon, refreshIcons, loading, emptyHtml, errorState, toast, modal, closeModal, confirmDialog,
     formValues, options, table, statCard, card,
   };

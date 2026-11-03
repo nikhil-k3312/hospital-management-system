@@ -12,7 +12,8 @@
     "seed": "node scripts/seed.js",
     "demo:iot": "node scripts/iot-simulator.js",
     "demo:tamper": "node scripts/tamper-demo.js",
-    "ledger:verify": "node scripts/verify-ledger.js"
+    "ledger:verify": "node scripts/verify-ledger.js",
+    "chain:anchor-pending": "node scripts/anchor-pending.js"
   },
   "engines": {
     "node": ">=18"
@@ -22,6 +23,7 @@
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "dotenv": "^16.6.1",
+    "ethers": "^6.17.0",
     "express": "^4.22.3",
     "express-rate-limit": "^7.5.1",
     "helmet": "^7.2.0",

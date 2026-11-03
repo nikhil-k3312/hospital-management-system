@@ -65,6 +65,19 @@ const userSchema = new mongoose.Schema({
     default: [],
     validate: { validator: (tokens) => tokens.length <= 5, message: 'A user can have at most 5 refresh tokens' },
   },
+  // Browsers that completed a full password + OTP login. Only the SHA-256 of the
+  // device token is kept; the token itself lives in an HttpOnly cookie.
+  trustedDevices: {
+    type: [{
+      _id: false,
+      tokenHash: { type: String, required: true },
+      userAgentHash: { type: String, default: '' },
+      createdAt: { type: Date, default: Date.now },
+      lastSeenAt: { type: Date, default: Date.now },
+    }],
+    default: [],
+  },
+  loginCount: { type: Number, default: 0 },
 }, { timestamps: true });
 
 userSchema.index({ role: 1, approvalStatus: 1 });
@@ -98,6 +111,7 @@ userSchema.methods.toJSON = function toJSON() {
   delete obj.failedLoginAttempts;
   delete obj.accountLockedUntil;
   delete obj.refreshTokens;
+  delete obj.trustedDevices;
   delete obj.__v;
   // Hide the other roles' (empty) profile sections. When a partial populate did
   // not select `role`, keep whatever profile fields were explicitly selected.

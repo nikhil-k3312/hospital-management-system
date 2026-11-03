@@ -287,7 +287,7 @@
             <div class="form-group"><label>Description</label><textarea name="description">${esc(r.description)}</textarea></div>
             <button class="btn btn-primary btn-sm" type="submit">Save amendment (new ledger entry)</button></form></details>` : ''}
         <h4 class="mt-3 mb-2">Files</h4>
-        ${r.attachments.map((a) => `<div class="list-item"><div class="grow"><div class="title">${esc(a.filename)}</div><div class="meta mono">SHA-256 ${esc(a.sha256)}</div></div>
+        ${r.attachments.map((a) => `<div class="list-item"><div class="grow"><div class="title">${esc(a.filename)}</div><div class="meta mono">SHA-256 ${esc(a.sha256)}</div><div class="meta">${UI.storageLine(a)}</div></div>
           <button type="button" class="btn btn-sm btn-secondary" data-download="${a.fileId}">Open</button></div>`).join('') || '<p class="text-muted">None</p>'}
         <form data-upload class="flex mt-2"><input type="file" name="file" accept=".pdf,.png,.jpg,.jpeg,.txt" required><button class="btn btn-sm btn-secondary" type="submit">${icon('paperclip')} Attach</button></form>
         <div class="flex-between mt-3 mb-2"><h4>Ledger history</h4><button type="button" class="btn btn-sm btn-primary" data-verify>${icon('shield-check')} Verify integrity</button></div>
@@ -305,8 +305,8 @@
         try {
           const v = (await c.api.get(`/api/records/${id}/verify`)).data;
           overlay.querySelector('[data-verify-result]').innerHTML = v.intact
-            ? `<div class="banner banner-success">${icon('badge-check')} Intact: content matches ledger block #${v.content.ledgerSeq}${v.files.length ? `; ${v.files.length} file hash(es) match` : ''}.</div>`
-            : `<div class="banner banner-danger">${icon('shield-x')} TAMPERING DETECTED. The stored record no longer matches the hash in the ledger.</div>`;
+            ? `<div class="banner banner-success">${icon('badge-check')} Intact: content matches ledger block #${v.content.ledgerSeq}${v.chain.checked ? ' and its blockchain anchor' : ''}${v.files.length ? `; ${v.files.length} file hash(es) match` : ''}.</div>`
+            : `<div class="banner banner-danger">${icon('shield-x')} TAMPERING DETECTED. The stored record no longer matches ${v.content.matches ? 'its blockchain anchor' : 'the hash in the ledger'}.</div>`;
           UI.refreshIcons();
         } catch (error) { UI.toast(error.message, 'error'); }
       }

@@ -13,6 +13,9 @@ const { asyncHandler, notFound, forbidden, badRequest } = require('../../utils/e
 const ledgerService = require('../../services/ledgerService');
 const consentService = require('../../services/consentService');
 const notificationService = require('../../services/notificationService');
+const ipfsService = require('../../services/ipfsService');
+const blockchainService = require('../../services/blockchainService');
+const { hashObject } = require('../../utils/hash');
 
 const router = express.Router();
 router.use(authenticate);
@@ -34,6 +37,17 @@ const upload = multer({
 });
 
 const populate = (q) => q.populate('doctorId', 'fullName doctorProfile.specialization').populate('patientId', 'fullName email');
+
+/** Anchors the record's current version on the blockchain: its content hash only, never its content. */
+async function anchorRecord(record) {
+  const result = await blockchainService.anchor({
+    entityType: 'record', entityId: record._id.toString(), version: record.version,
+    dataHash: hashObject(record.ledgerPayload()), patientId: record.patientId.toString(),
+  });
+  record.chain = { status: result.status, key: result.key, txHash: result.txHash || null, blockNumber: result.blockNumber || null, version: record.version };
+}
+
+const sha256Of = (buffer) => crypto.createHash('sha256').update(buffer).digest('hex');
 
 async function loadRecordWithAccess(req) {
   const record = await MedicalRecord.findById(req.params.id);
@@ -78,6 +92,7 @@ router.post('/', writePolicy,
     });
     const entry = await ledgerService.recordEvent({ entityType: 'record', entity: record, action: 'CREATE', actor: req.user });
     record.ledgerEntryId = entry._id.toString();
+    await anchorRecord(record);
     await record.save();
 
     if (role === 'doctor') {
@@ -129,6 +144,7 @@ router.patch('/:id', requireRole('doctor', { minTrustScore: config.security.high
       entityType: 'record', entity: record, action: 'UPDATE', actor: req.user, meta: { version: record.version },
     });
     record.ledgerEntryId = entry._id.toString();
+    await anchorRecord(record);
     await record.save();
     res.json({ success: true, message: `Record amended (version ${record.version})`, data: await populate(MedicalRecord.findById(record._id)) });
   }));
@@ -146,34 +162,48 @@ router.get('/:id/ledger-history', readPolicy, validate({ params: Joi.object({ id
 /**
  * GET /api/records/:id/verify: tamper check for one record.
  *   1. the record's current content hash must equal the ledger's last payloadHash
- *   2. every attached file's bytes must still hash to the SHA-256 in the ledger
+ *   2. the same hash must be anchored on the blockchain for the current version
+ *   3. every attached file must still hash to its recorded SHA-256 (IPFS files are
+ *      downloaded and decrypted first), and that SHA-256 must be on the blockchain
  */
 router.get('/:id/verify', readPolicy, validate({ params: Joi.object({ id: objectId().required() }) }), asyncHandler(async (req, res) => {
   const record = await loadRecordWithAccess(req);
   const content = await ledgerService.verifyEntity('record', record);
+  const chain = await blockchainService.verify({
+    entityType: 'record', entityId: record._id.toString(), version: record.version, dataHash: hashObject(record.ledgerPayload()),
+  });
 
   const files = [];
   for (const attachment of record.attachments) {
-    const hash = crypto.createHash('sha256');
+    const base = { fileId: attachment.fileId, filename: attachment.filename, storage: attachment.storage, expected: attachment.sha256 };
+    let actual;
     try {
-      await new Promise((resolve, reject) => {
-        getBucket().openDownloadStream(new mongoose.Types.ObjectId(attachment.fileId))
-          .on('data', (chunk) => hash.update(chunk)).on('error', reject).on('end', resolve);
-      });
-      const actual = hash.digest('hex');
-      files.push({ fileId: attachment.fileId, filename: attachment.filename, matches: actual === attachment.sha256, expected: attachment.sha256, actual });
+      if (attachment.storage === 'ipfs') {
+        actual = sha256Of(await ipfsService.fetchFile(attachment.cid));
+      } else {
+        const hash = crypto.createHash('sha256');
+        await new Promise((resolve, reject) => {
+          getBucket().openDownloadStream(new mongoose.Types.ObjectId(attachment.fileId))
+            .on('data', (chunk) => hash.update(chunk)).on('error', reject).on('end', resolve);
+        });
+        actual = hash.digest('hex');
+      }
     } catch (error) {
-      files.push({ fileId: attachment.fileId, filename: attachment.filename, matches: false, error: 'file_missing' });
+      files.push({ ...base, matches: false, error: error.message === 'IPFS_UNAVAILABLE' ? 'storage_unreachable' : 'file_missing_or_altered' });
+      continue;
     }
+    const fileChain = await blockchainService.verify({ entityType: 'file', entityId: attachment.fileId, version: 1, dataHash: attachment.sha256 });
+    files.push({ ...base, actual, matches: actual === attachment.sha256 && (!fileChain.checked || fileChain.matches), chain: fileChain });
   }
-  const intact = content.matches && files.every((f) => f.matches);
-  res.json({ success: true, data: { recordId: record._id, intact, content, files } });
+  const intact = content.matches && (!chain.checked || chain.matches) && files.every((f) => f.matches);
+  res.json({ success: true, data: { recordId: record._id, intact, content, chain, files } });
 }));
 
 /**
  * POST /api/records/:id/files: upload an attachment (multipart field "file").
- * The bytes go to GridFS; their SHA-256 goes into the record and the ledger
- * (where the original design put the IPFS hash).
+ * With IPFS configured the bytes are encrypted and stored on IPFS (only the CID is
+ * kept in MongoDB); otherwise they go to GridFS. Either way the plaintext SHA-256
+ * goes into the record, the ledger and the blockchain.
  */
 router.post('/:id/files', writePolicy, validate({ params: Joi.object({ id: objectId().required() }) }),
   upload.single('file'),
@@ -184,29 +214,48 @@ router.post('/:id/files', writePolicy, validate({ params: Joi.object({ id: objec
       throw forbidden('Patients can attach files only to their own uploads');
     }
 
-    const sha256 = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
-    const fileId = await new Promise((resolve, reject) => {
-      const stream = getBucket().openUploadStream(req.file.originalname, {
-        metadata: { recordId: record._id.toString(), patientId: record.patientId.toString(), sha256, contentType: req.file.mimetype, uploadedBy: req.user.userId },
+    const sha256 = sha256Of(req.file.buffer);
+    let fileId;
+    let cid = null;
+    let storage = 'gridfs';
+    if (ipfsService.enabled) {
+      const stored = await ipfsService.storeFile(req.file.buffer);
+      fileId = new mongoose.Types.ObjectId().toString();
+      cid = stored.cid;
+      storage = 'ipfs';
+    } else {
+      fileId = await new Promise((resolve, reject) => {
+        const stream = getBucket().openUploadStream(req.file.originalname, {
+          metadata: { recordId: record._id.toString(), patientId: record.patientId.toString(), sha256, contentType: req.file.mimetype, uploadedBy: req.user.userId },
+        });
+        Readable.from(req.file.buffer).pipe(stream).on('error', reject).on('finish', () => resolve(stream.id.toString()));
       });
-      Readable.from(req.file.buffer).pipe(stream).on('error', reject).on('finish', () => resolve(stream.id.toString()));
-    });
+    }
 
+    const fileAnchor = await blockchainService.anchor({
+      entityType: 'file', entityId: fileId, version: 1, dataHash: sha256, patientId: record.patientId.toString(),
+    });
     record.attachments.push({
-      fileId, filename: req.file.originalname, contentType: req.file.mimetype, size: req.file.size, sha256, uploadedBy: req.user.userId,
+      fileId, storage, cid, filename: req.file.originalname, contentType: req.file.mimetype, size: req.file.size, sha256, uploadedBy: req.user.userId,
+      chain: { status: fileAnchor.status, key: fileAnchor.key, txHash: fileAnchor.txHash || null, blockNumber: fileAnchor.blockNumber || null, version: 1 },
     });
     await ledgerService.append({
       chain: 'records', entityType: 'file', entityId: fileId, action: 'FILE_ATTACHED',
       actorId: req.user.userId, actorRole: req.user.role, payloadHash: sha256,
-      meta: { recordId: record._id.toString(), filename: req.file.originalname, size: req.file.size },
+      meta: { recordId: record._id.toString(), filename: req.file.originalname, size: req.file.size, storage },
     });
-    // The record's own content (its attachment list) changed too, so chain a new version.
+    // The record's own content (its attachment list) changed too, so chain and anchor a new version.
     record.version += 1;
     const entry = await ledgerService.recordEvent({ entityType: 'record', entity: record, action: 'UPDATE', actor: req.user, meta: { attached: fileId } });
     record.ledgerEntryId = entry._id.toString();
+    await anchorRecord(record);
     await record.save();
 
-    res.status(201).json({ success: true, message: 'File stored and its SHA-256 recorded in the ledger', data: { fileId, sha256, record } });
+    res.status(201).json({
+      success: true,
+      message: storage === 'ipfs' ? 'File encrypted, stored on IPFS and its hash anchored on the blockchain' : 'File stored and its SHA-256 recorded in the ledger',
+      data: { fileId, sha256, cid, storage, chain: fileAnchor.status, record },
+    });
   }));
 
 module.exports = router;

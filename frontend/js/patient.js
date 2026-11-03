@@ -178,7 +178,8 @@
         </dl>
         <h4 class="mt-3 mb-2">Attachments</h4>
         ${r.attachments.length ? r.attachments.map((a) => `<div class="list-item"><div class="grow"><div class="title">${esc(a.filename)}</div>
-          <div class="meta">${(a.size / 1024).toFixed(1)} kB · SHA-256 <span class="mono">${esc(UI.shortHash(a.sha256, 20))}</span></div></div>
+          <div class="meta">${(a.size / 1024).toFixed(1)} kB · SHA-256 <span class="mono">${esc(UI.shortHash(a.sha256, 20))}</span></div>
+          <div class="meta">${UI.storageLine(a)}</div></div>
           <button type="button" class="btn btn-sm btn-secondary" data-download="${a.fileId}" data-name="${esc(a.filename)}">Open</button></div>`).join('') : '<p class="text-muted">No files attached.</p>'}
         <div class="flex-between mt-3 mb-2"><h4>Ledger history</h4><button type="button" class="btn btn-sm btn-primary" data-verify="${r._id}">${icon('shield-check')} Verify integrity</button></div>
         <div data-verify-result></div>
@@ -204,8 +205,8 @@
         try {
           const res = (await c.api.get(`/api/records/${v.dataset.verify}/verify`)).data;
           overlay.querySelector('[data-verify-result]').innerHTML = res.intact
-            ? `<div class="banner banner-success">${icon('badge-check')} Intact. The record's content hash matches ledger block #${res.content.ledgerSeq}${res.files.length ? ` and all ${res.files.length} file(s) match their recorded SHA-256` : ''}.</div>`
-            : `<div class="banner banner-danger">${icon('shield-x')} TAMPERING DETECTED. ${res.content.matches ? '' : 'The record was changed outside MediChain: it no longer matches its ledger entry. '}${res.files.filter((f) => !f.matches).map((f) => `${esc(f.filename)} does not match its hash. `).join('')}</div>`;
+            ? `<div class="banner banner-success">${icon('badge-check')} Intact. The record's content hash matches ledger block #${res.content.ledgerSeq}${res.chain.checked ? ' and the hash anchored on the blockchain' : ''}${res.files.length ? `, and all ${res.files.length} file(s) match their recorded SHA-256` : ''}.</div>`
+            : `<div class="banner banner-danger">${icon('shield-x')} TAMPERING DETECTED. ${res.content.matches ? '' : 'The record was changed outside MediChain: it no longer matches its ledger entry. '}${res.chain.checked && !res.chain.matches ? 'Its hash differs from the one on the blockchain. ' : ''}${res.files.filter((f) => !f.matches).map((f) => `${esc(f.filename)} does not match its hash. `).join('')}</div>`;
           UI.refreshIcons();
         } catch (error) { UI.toast(error.message, 'error'); }
         v.disabled = false;

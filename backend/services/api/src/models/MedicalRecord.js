@@ -2,14 +2,26 @@ const mongoose = require('mongoose');
 
 const RECORD_TYPES = ['diagnosis', 'lab_result', 'imaging', 'visit_note', 'vaccination', 'allergy', 'patient_upload', 'other'];
 
+// Where a hash was anchored on the blockchain (HealthRecordRegistry).
+const chainAnchorSchema = new mongoose.Schema({
+  status: { type: String, enum: ['anchored', 'pending', 'disabled'], default: 'disabled' },
+  key: { type: String, default: null },
+  txHash: { type: String, default: null },
+  blockNumber: { type: Number, default: null },
+  version: { type: Number, default: null },
+}, { _id: false });
+
 const attachmentSchema = new mongoose.Schema({
-  fileId: { type: String, required: true }, // GridFS id
+  fileId: { type: String, required: true }, // our id for the file (GridFS id for legacy files)
+  storage: { type: String, enum: ['ipfs', 'gridfs'], default: 'gridfs' },
+  cid: { type: String, default: null }, // IPFS content id of the ENCRYPTED bytes
   filename: { type: String, required: true },
   contentType: { type: String, required: true },
   size: { type: Number, required: true },
-  sha256: { type: String, required: true }, // also written into the ledger
+  sha256: { type: String, required: true }, // hash of the original bytes: ledger + blockchain
   uploadedBy: { type: String, required: true },
   uploadedAt: { type: Date, default: Date.now },
+  chain: { type: chainAnchorSchema, default: () => ({}) },
 }, { _id: false });
 
 const medicalRecordSchema = new mongoose.Schema({
@@ -24,6 +36,7 @@ const medicalRecordSchema = new mongoose.Schema({
   attachments: { type: [attachmentSchema], default: [] },
   version: { type: Number, default: 1 },
   ledgerEntryId: { type: String, default: null }, // latest ledger entry for this record
+  chain: { type: chainAnchorSchema, default: () => ({}) }, // anchor of the latest version
 }, { timestamps: true });
 
 /**

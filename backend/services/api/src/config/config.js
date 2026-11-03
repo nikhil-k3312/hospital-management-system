@@ -75,6 +75,26 @@ const config = {
     maxBytes: toInt(env.MAX_UPLOAD_MB, 10) * 1024 * 1024,
   },
 
+  // Attachments are encrypted with AES-256-GCM and stored on IPFS (Kubo HTTP API).
+  ipfs: {
+    apiUrl: (env.IPFS_API_URL || '').replace(/\/$/, ''),
+    encryptionKey: env.IPFS_ENCRYPTION_KEY || '', // 64 hex characters = 32 bytes
+    timeoutMs: toInt(env.IPFS_TIMEOUT_MS, 15000),
+  },
+
+  // Fingerprints (hashes only) are anchored in the HealthRecordRegistry contract.
+  chain: {
+    rpcUrl: env.CHAIN_RPC_URL || '',
+    contractAddress: env.CHAIN_CONTRACT_ADDRESS || '',
+    privateKey: env.CHAIN_PRIVATE_KEY || '',
+    patientRefSecret: env.PATIENT_REF_SECRET || '',
+  },
+
+  // A browser that completed a full password + OTP login is remembered for this long.
+  devices: {
+    trustDays: toInt(env.TRUSTED_DEVICE_DAYS, 30),
+  },
+
   frontendDir: path.resolve(__dirname, '../../../../../frontend'),
 };
 
@@ -104,6 +124,16 @@ function validateConfig(cfg = config, rawEnv = env) {
 
   if (rawEnv.JWT_SECRET === rawEnv.JWT_REFRESH_SECRET) {
     throw new Error('JWT_SECRET and JWT_REFRESH_SECRET must be different');
+  }
+
+  if (cfg.ipfs?.apiUrl && !/^[0-9a-fA-F]{64}$/.test(cfg.ipfs.encryptionKey)) {
+    throw new Error('IPFS_ENCRYPTION_KEY must be 64 hex characters when IPFS_API_URL is set');
+  }
+
+  const chainVars = ['CHAIN_RPC_URL', 'CHAIN_CONTRACT_ADDRESS', 'CHAIN_PRIVATE_KEY', 'PATIENT_REF_SECRET'];
+  const chainSet = chainVars.filter((key) => rawEnv[key]);
+  if (chainSet.length > 0 && chainSet.length < chainVars.length) {
+    throw new Error(`Blockchain anchoring needs all of: ${chainVars.join(', ')}`);
   }
 
   return true;

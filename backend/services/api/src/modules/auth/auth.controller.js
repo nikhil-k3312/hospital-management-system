@@ -4,6 +4,8 @@ const emailService = require('../../services/emailService');
 const tokenService = require('../../services/tokenService');
 const ledgerService = require('../../services/ledgerService');
 const notificationService = require('../../services/notificationService');
+const deviceService = require('../../services/deviceService');
+const routingService = require('../../services/routingService');
 const { invalidateSession } = require('../../middleware/auth');
 const config = require('../../config/config');
 const logger = require('../../utils/logger');
@@ -175,21 +177,101 @@ async function verifyOtp(req, res) {
   }
 
   await otpService.clearAttempts(email);
+  const firstLogin = user.loginCount === 0;
   user.failedLoginAttempts = 0;
   user.accountLockedUntil = null;
   user.lastLogin = new Date();
   user.isVerified = true;
+  user.loginCount += 1;
   await user.save({ validateBeforeSave: false });
   await invalidateSession(user._id);
 
   const access = await issueSession(res, user);
-  logger.info(`Login: ${email} (${user.role})`);
+  // The full password + code login makes this browser a trusted device for next time.
+  await deviceService.trust(req, res, user);
+  const landing = firstLogin ? routingService.homeFor(user) : await routingService.resolveLanding(user);
+  logger.info(`Login: ${email} (${user.role})${firstLogin ? ' [first login]' : ''}`);
 
   res.json({
     success: true,
     message: 'Login successful',
-    data: { user: user.toJSON(), token: access.token, expiresIn: access.expiresIn },
+    data: { user: user.toJSON(), token: access.token, expiresIn: access.expiresIn, landing, firstLogin },
   });
+}
+
+/** Masks an email for display on a shared screen: s****@example.com */
+function maskEmail(email) {
+  const [name, domain] = email.split('@');
+  return `${name.charAt(0)}${'*'.repeat(Math.max(1, name.length - 1))}@${domain}`;
+}
+
+/**
+ * POST /api/auth/route: the dynamic router the login page calls on load.
+ *   unknown browser               -> { mode: 'login' }      normal first-time login form
+ *   trusted browser, live session -> { mode: 'redirect' }   straight to the computed landing page
+ *   trusted browser, no session   -> { mode: 'returning' }  "welcome back", password only
+ */
+async function route(req, res) {
+  const known = await deviceService.recognise(req);
+  if (!known) return res.json({ success: true, data: { mode: 'login' } });
+  const { user } = known;
+
+  const presented = req.cookies?.[REFRESH_COOKIE];
+  if (presented) {
+    try {
+      const decoded = await tokenService.verifyRefreshToken(presented);
+      if (decoded.userId === user._id.toString()) {
+        await tokenService.revokeRefreshToken(decoded.userId, decoded.jti);
+        await User.updateOne({ _id: user._id }, { $pull: { refreshTokens: tokenService.hashJTI(decoded.jti) } });
+        const access = await issueSession(res, user);
+        const landing = await routingService.resolveLanding(user);
+        return res.json({ success: true, data: { mode: 'redirect', landing, token: access.token, user: user.toJSON() } });
+      }
+    } catch (error) {
+      if (error.message === 'REDIS_UNAVAILABLE') throw error;
+      // expired or revoked session: fall through to the returning-user form
+    }
+  }
+
+  res.json({
+    success: true,
+    data: { mode: 'returning', firstName: user.fullName.split(' ')[0], emailHint: maskEmail(user.email), role: user.role },
+  });
+}
+
+/**
+ * POST /api/auth/login/quick: second-time login on a trusted browser, password only.
+ * Adaptive: if anything looks risky (recent failures), the emailed code is still required.
+ */
+async function quickLogin(req, res) {
+  const known = await deviceService.recognise(req);
+  if (!known) throw unauthorized('This browser is not recognised. Use the full sign-in.', 'DEVICE_UNKNOWN');
+  const { user } = known;
+
+  if (user.isAccountLocked()) throw forbidden('Account is locked after too many failed attempts. Try again later.', 'ACCOUNT_LOCKED');
+  if (!(await user.comparePassword(req.body.password))) {
+    const failed = await recordFailedAttempt(user);
+    return res.status(401).json({
+      success: false, message: INVALID_CREDENTIALS, code: 'INVALID_CREDENTIALS',
+      attemptsRemaining: Math.max(0, config.security.maxFailedLogins - failed),
+    });
+  }
+
+  if (user.failedLoginAttempts > 0) {
+    const otp = otpService.generateOTP();
+    await otpService.storeOTP(user.email, otp);
+    await emailService.sendOTP(user.email, otp, user.fullName);
+    await otpService.incrementAttempts(user.email);
+    return res.json({ success: true, message: 'For your security, enter the code sent to your email', data: { mode: 'otp', email: user.email, expiresInMinutes: config.otp.expiryMinutes } });
+  }
+
+  user.lastLogin = new Date();
+  user.loginCount += 1;
+  await user.save({ validateBeforeSave: false });
+  const access = await issueSession(res, user);
+  const landing = await routingService.resolveLanding(user);
+  logger.info(`Quick login on trusted device: ${user.email}`);
+  res.json({ success: true, message: 'Welcome back', data: { mode: 'redirect', landing, token: access.token, user: user.toJSON() } });
 }
 
 /**
@@ -270,9 +352,10 @@ async function changePassword(req, res) {
   await tokenService.revokeAllRefreshTokens(user._id.toString());
   await tokenService.blacklistAccessToken(req.user);
   await invalidateSession(user._id);
+  await deviceService.forgetAll(res, user._id); // every browser goes back to the full login
   res.clearCookie(REFRESH_COOKIE, { ...cookieOptions(), maxAge: undefined });
 
   res.json({ success: true, message: 'Password changed. Please log in again on all devices.' });
 }
 
-module.exports = { register, requestOtp, verifyOtp, refreshToken, logout, changePassword, REFRESH_COOKIE };
+module.exports = { register, requestOtp, verifyOtp, route, quickLogin, refreshToken, logout, changePassword, REFRESH_COOKIE };

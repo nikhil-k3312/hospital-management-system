@@ -5,6 +5,11 @@
  * Step 2  POST /api/auth/login/verify-otp    email + code     -> access token + HttpOnly refresh cookie
  * Then the browser goes to the user's dashboard, which restores the session
  * from the cookie. Registration uses POST /api/auth/register.
+ *
+ * Second visit: on load the page asks POST /api/auth/route (the dynamic router).
+ * An unknown browser gets the normal form above. A browser that completed the full
+ * login before is either sent straight to the page the server picked for this
+ * user, or shown a short "welcome back" form that needs only the password.
  */
 (function loginPage() {
   const api = window.MediApi;
@@ -16,7 +21,7 @@
   };
 
   const $ = (id) => document.getElementById(id);
-  const forms = ['loginForm', 'twoStepVerification', 'roleSelection', 'registerForm'];
+  const forms = ['loginForm', 'returningForm', 'twoStepVerification', 'roleSelection', 'registerForm'];
   // Held only in memory between step 1 and step 2 (needed for "resend"), wiped after sign-in.
   const pending = { email: '', password: '' };
   let resendTimer = null;
@@ -55,11 +60,69 @@
     button.querySelector('.loading-spinner').style.display = on ? 'inline-block' : 'none';
   }
 
-  function redirectAfterLogin(role) {
+  function redirectAfterLogin(role, landing) {
     const next = new URLSearchParams(location.search).get('next');
-    // Only follow "next" when it points at this user's own dashboard (prevents open redirects).
-    const target = next && next.startsWith(DASHBOARDS[role]) ? next : DASHBOARDS[role];
+    // Only follow a path that points at this user's own dashboard (prevents open redirects).
+    const own = (path) => path && path.startsWith(DASHBOARDS[role]);
+    let target = DASHBOARDS[role];
+    if (own(next)) target = next;
+    else if (landing && own(landing.path)) target = landing.path;
     location.replace(target);
+  }
+
+  /* ---------------------------------------------------------------- dynamic routing */
+
+  /**
+   * Asks the server what this browser should see. Returns true when the page has
+   * been taken care of (redirect or welcome-back form), false for a first visit.
+   */
+  async function resolveRoute() {
+    const { data } = await api.post('/api/auth/route');
+    if (data.mode === 'redirect') {
+      api.setToken(data.token);
+      redirectAfterLogin(data.user.role, data.landing);
+      return true;
+    }
+    if (data.mode === 'returning') {
+      $('returningName').textContent = data.firstName;
+      $('returningEmail').textContent = data.emailHint;
+      showForm('returningForm');
+      return true;
+    }
+    return false;
+  }
+
+  async function onQuickLogin(event) {
+    event.preventDefault();
+    setMessage('returningMessage', '');
+    const password = $('returningPassword').value;
+    if (!password) { setMessage('returningMessage', 'Enter your password.'); return; }
+    const button = $('returningSubmitBtn');
+    setLoading(button, true);
+    try {
+      const res = await api.post('/api/auth/login/quick', { password });
+      if (res.data.mode === 'otp') {
+        // Something looked risky (e.g. a recent failed attempt): fall back to the emailed code.
+        pending.email = res.data.email;
+        pending.password = password;
+        $('verificationContact').textContent = res.data.email;
+        $('otpMinutes').textContent = res.data.expiresInMinutes;
+        showForm('twoStepVerification');
+        clearCode();
+        startResendTimer();
+        notify(res.message, 'info');
+        return;
+      }
+      api.setToken(res.data.token);
+      notify(`Welcome back, ${res.data.user.fullName}. ${res.data.landing.reason}.`);
+      setTimeout(() => redirectAfterLogin(res.data.user.role, res.data.landing), 600);
+    } catch (error) {
+      if (error.code === 'DEVICE_UNKNOWN') { showForm('loginForm'); setMessage('loginMessage', error.message); return; }
+      const remaining = error.body && error.body.attemptsRemaining;
+      setMessage('returningMessage', remaining !== undefined ? `${error.message}. ${remaining} attempt(s) left before the account locks.` : error.message);
+    } finally {
+      setLoading(button, false);
+    }
   }
 
   /* ---------------------------------------------------------------- sign in */
@@ -108,7 +171,7 @@
       const res = await api.post('/api/auth/login/verify-otp', { email: pending.email, otp });
       pending.password = '';
       notify(`Welcome, ${res.data.user.fullName}. Opening your dashboard…`);
-      setTimeout(() => redirectAfterLogin(res.data.user.role), 600);
+      setTimeout(() => redirectAfterLogin(res.data.user.role, res.data.landing), 600);
     } catch (error) {
       const remaining = error.body && error.body.attemptsRemaining;
       setMessage('otpMessage', remaining !== undefined ? `${error.message}. ${remaining} attempt(s) left.` : error.message);
@@ -253,16 +316,16 @@
     if (params.has('loggedOut')) setMessage('loginMessage', 'You have been signed out.', 'success');
     else if (params.has('passwordChanged')) setMessage('loginMessage', 'Password changed. Sign in with your new password.', 'success');
     else {
-      // Already signed in on this browser? Go straight to the dashboard.
+      // Second visit? The dynamic router decides between redirect, welcome-back form or full login.
       try {
-        const user = await api.refreshSession();
-        redirectAfterLogin(user.role);
-        return;
-      } catch (e) { /* no session: show the form */ }
+        if (await resolveRoute() && !$('returningForm').classList.contains('form-visible')) return;
+      } catch (e) { /* server unreachable or first visit: show the normal form */ }
     }
     if (location.hash === '#register') showForm('roleSelection');
 
     $('loginForm').addEventListener('submit', onLogin);
+    $('returningForm').addEventListener('submit', onQuickLogin);
+    $('notMeBtn').addEventListener('click', () => showForm('loginForm'));
     $('verifyCodeBtn').addEventListener('click', onVerify);
     $('resendCodeBtn').addEventListener('click', async () => {
       if (await requestCode($('verifyCodeBtn'))) { notify('A new code was sent.', 'info'); clearCode(); startResendTimer(); }
