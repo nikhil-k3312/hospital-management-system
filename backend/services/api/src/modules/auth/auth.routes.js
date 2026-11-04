@@ -61,7 +61,9 @@ router.post('/login/challenge',
     challengeId: Joi.string().hex().length(48).required(),
     otp: Joi.string().pattern(/^\d{4,8}$/).required(),
     securityAnswer: Joi.string().trim().max(100),
-  }) }),
+    // emergency sign-in: a clinical reason instead of the security answer (doctor/admin only)
+    emergencyReason: Joi.string().trim().min(10).max(300),
+  }).oxor('securityAnswer', 'emergencyReason') }),
   asyncHandler(controller.verifyChallenge));
 router.post('/refresh-token', asyncHandler(controller.refreshToken));
 router.post('/logout', authenticate, asyncHandler(controller.logout));

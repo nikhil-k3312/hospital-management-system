@@ -28,6 +28,13 @@ describe('contextService', () => {
     expect(contextService.networkPrefix('2001:db8:abcd:12::1')).toBe('2001:db8:abcd::/48');
   });
 
+  test('behaviour penalty: minus 10 per failed attempt since the last login, at most minus 30', () => {
+    expect(contextService.behaviourPenalty({ failedLoginAttempts: 0 }).score).toBe(0);
+    expect(contextService.behaviourPenalty({ failedLoginAttempts: 1 }).score).toBe(-10);
+    expect(contextService.behaviourPenalty({ failedLoginAttempts: 4 }).score).toBe(-30);
+    expect(contextService.behaviourPenalty({}).failures).toBe(0);
+  });
+
   test('the hour is read in the hospital time zone', () => {
     // 03:30 UTC is 09:00 in India
     expect(contextService.localHour(new Date('2026-11-03T03:30:00Z'), 'Asia/Kolkata')).toBe(9);

@@ -11,6 +11,7 @@ const redisClient = require('../../db/redis');
 const crypto = require('crypto');
 const { sha256 } = require('../../utils/hash');
 const { invalidateSession } = require('../../middleware/auth');
+const { BREAK_GLASS_ROLES } = require('../../services/trustService');
 const config = require('../../config/config');
 const logger = require('../../utils/logger');
 const { badRequest, unauthorized, forbidden, tooMany, conflict } = require('../../utils/errors');
@@ -45,17 +46,24 @@ async function recordFailedAttempt(user) {
   return updated.failedLoginAttempts;
 }
 
-/** Issues a token pair, stores the refresh token's hashed id, sets the cookie. */
-async function issueSession(res, user) {
-  const access = tokenService.generateAccessToken(user);
-  const refresh = await tokenService.generateRefreshToken(user);
+/**
+ * Issues a token pair, stores the refresh token's hashed id, sets the cookie.
+ * emergency = { until (epoch seconds), reason } makes it a short emergency session.
+ */
+async function issueSession(res, user, emergency = null) {
+  const options = emergency ? { emergencyUntil: emergency.until, emergencyReason: emergency.reason } : {};
+  const access = tokenService.generateAccessToken(user, options);
+  const refresh = await tokenService.generateRefreshToken(user, options);
   await User.updateOne(
     { _id: user._id },
     { $push: { refreshTokens: { $each: [refresh.jtiHash], $slice: -5 } } }
   );
-  res.cookie(REFRESH_COOKIE, refresh.token, cookieOptions());
+  res.cookie(REFRESH_COOKIE, refresh.token, emergency ? { ...cookieOptions(), maxAge: refresh.ttl * 1000 } : cookieOptions());
   return access;
 }
+
+/** What the pages need to know about an emergency session (null for a normal one). */
+const emergencyInfo = (emergency) => (emergency ? { until: new Date(emergency.until * 1000).toISOString(), reason: emergency.reason } : null);
 
 /** POST /api/auth/register: patients, doctors and insurance agents self-register. */
 async function register(req, res) {
@@ -216,7 +224,7 @@ const CHALLENGE_TTL_SECONDS = 10 * 60;
 const challengeKey = (id) => `login:challenge:${id}`;
 
 /** Writes the dynamic-login decision to the "access" chain of the ledger (no raw IP or coordinates). */
-function auditContext(req, user, assessment, decision, reason) {
+function auditContext(req, user, assessment, decision, reason, emergencyReason) {
   return ledgerService.append({
     chain: 'access',
     entityType: 'login_context',
@@ -234,8 +242,10 @@ function auditContext(req, user, assessment, decision, reason) {
       device: assessment.breakdown.device.category,
       time: assessment.breakdown.time.category,
       network: assessment.breakdown.network.category,
+      behaviour: assessment.breakdown.behaviour?.category,
       ipHash: assessment.ipHash,
       userAgentHash: sha256(req.get('user-agent') || ''),
+      emergencyReason: emergencyReason || undefined,
     },
   }).catch((error) => logger.error(`Login audit failed: ${error.message}`));
 }
@@ -243,21 +253,39 @@ function auditContext(req, user, assessment, decision, reason) {
 /** Public part of an assessment: what the login page shows the user. */
 const publicAssessment = (a) => ({ score: a.score, risk: a.risk, tier: a.tier, factors: a.factors, breakdown: a.breakdown });
 
-/** Signs the user in after the dynamic login: session, trusted device, known network, landing page. */
-async function completeDynamicLogin(req, res, user, assessment, deviceKnown) {
+/**
+ * Signs the user in after the dynamic login: session, trusted device, known network, landing page.
+ * An emergency sign-in gets a short session and does not make this browser or network trusted,
+ * because the security question that would have proved them was skipped.
+ */
+async function completeDynamicLogin(req, res, user, assessment, deviceKnown, emergency = null) {
   user.failedLoginAttempts = 0;
   user.accountLockedUntil = null;
   user.lastLogin = new Date();
   user.loginCount += 1;
-  contextService.rememberNetwork(user, assessment);
+  if (!emergency) contextService.rememberNetwork(user, assessment);
   await user.save({ validateBeforeSave: false });
   await invalidateSession(user._id);
-  const access = await issueSession(res, user);
-  if (!deviceKnown) await deviceService.trust(req, res, user); // the extra factors just proved this browser
+  const access = await issueSession(res, user, emergency);
+  if (!deviceKnown && !emergency) await deviceService.trust(req, res, user); // the extra factors just proved this browser
   const landing = await routingService.resolveLanding(user);
-  await auditContext(req, user, assessment, 'allow', 'dynamic_login_success');
-  logger.info(`Dynamic login: ${user.email} score ${assessment.score} (${assessment.risk} risk)`);
-  return { mode: 'redirect', landing, token: access.token, user: user.toJSON(), assessment: publicAssessment(assessment) };
+  if (emergency) {
+    await auditContext(req, user, assessment, 'allow', 'emergency_login', emergency.reason);
+    await notificationService.notifyRole('admin', {
+      type: 'warning',
+      title: 'Emergency sign-in used',
+      message: `${user.fullName} (${user.role}) signed in with emergency access at trust score ${assessment.score}. Reason: "${emergency.reason}". Review it in Access Control.`,
+      page: 'access',
+    });
+    logger.warn(`Emergency login: ${user.email} score ${assessment.score}`);
+  } else {
+    await auditContext(req, user, assessment, 'allow', 'dynamic_login_success');
+    logger.info(`Dynamic login: ${user.email} score ${assessment.score} (${assessment.risk} risk)`);
+  }
+  return {
+    mode: 'redirect', landing, token: access.token, user: user.toJSON(), assessment: publicAssessment(assessment),
+    emergency: emergencyInfo(emergency),
+  };
 }
 
 /**
@@ -279,10 +307,12 @@ async function route(req, res) {
       if (decoded.userId === user._id.toString()) {
         await tokenService.revokeRefreshToken(decoded.userId, decoded.jti);
         await User.updateOne({ _id: user._id }, { $pull: { refreshTokens: tokenService.hashJTI(decoded.jti) } });
-        const access = await issueSession(res, user);
+        // resuming an emergency session keeps its original end time
+        const emergency = decoded.emergencyUntil ? { until: decoded.emergencyUntil, reason: decoded.emergencyReason } : null;
+        const access = await issueSession(res, user, emergency);
         const landing = await routingService.resolveLanding(user);
         await auditContext(req, user, assessment, 'allow', 'session_resumed_low_risk');
-        return res.json({ success: true, data: { mode: 'redirect', landing, token: access.token, user: user.toJSON(), assessment: publicAssessment(assessment) } });
+        return res.json({ success: true, data: { mode: 'redirect', landing, token: access.token, user: user.toJSON(), assessment: publicAssessment(assessment), emergency: emergencyInfo(emergency) } });
       }
     } catch (error) {
       if (error.message === 'REDIS_UNAVAILABLE') throw error;
@@ -358,12 +388,19 @@ async function dynamicLogin(req, res) {
     data: {
       mode: 'challenge', challengeId, email: user.email, expiresInMinutes: config.otp.expiryMinutes,
       securityQuestion: assessment.factors.includes('security_question') ? user.securityQuestion : null,
+      // doctors and admins may replace the security question with an emergency reason
+      emergencyAllowed: assessment.factors.includes('security_question') && BREAK_GLASS_ROLES.includes(user.role),
       assessment: publicAssessment(assessment),
     },
   });
 }
 
-/** POST /api/auth/login/challenge: the extra factors the context assessment asked for. */
+/**
+ * POST /api/auth/login/challenge: the extra factors the context assessment asked for.
+ * Emergency sign-in (break-glass at login): a doctor or admin facing the security
+ * question may give a clinical reason instead. The emailed code is still required,
+ * the session lasts EMERGENCY_SESSION_MINUTES, and the use is audited and reported.
+ */
 async function verifyChallenge(req, res) {
   const raw = await redisClient.get(challengeKey(req.body.challengeId));
   if (!raw) throw unauthorized('This sign-in attempt has expired. Start again.', 'CHALLENGE_EXPIRED');
@@ -383,13 +420,26 @@ async function verifyChallenge(req, res) {
     await otpService.incrementAttempts(user.email);
     return fail(otpResult.message, 'INVALID_OTP');
   }
-  if (challenge.factors.includes('security_question') && !(await user.compareSecurityAnswer(req.body.securityAnswer))) {
-    return fail('The security answer is not correct', 'INVALID_SECURITY_ANSWER');
+  let emergency = null;
+  if (challenge.factors.includes('security_question')) {
+    if (req.body.emergencyReason) {
+      if (!BREAK_GLASS_ROLES.includes(user.role)) {
+        await auditContext(req, user, challenge.assessment, 'deny', 'emergency_not_allowed', req.body.emergencyReason);
+        throw forbidden('Emergency sign-in is available to doctors and administrators only.', 'EMERGENCY_NOT_ALLOWED');
+      }
+      emergency = { until: Math.floor(Date.now() / 1000) + config.security.emergencySessionMinutes * 60, reason: req.body.emergencyReason };
+    } else if (!(await user.compareSecurityAnswer(req.body.securityAnswer))) {
+      return fail('The security answer is not correct', 'INVALID_SECURITY_ANSWER');
+    }
   }
 
   await redisClient.del(challengeKey(req.body.challengeId));
   await otpService.clearAttempts(user.email);
-  res.json({ success: true, message: 'Login successful', data: await completeDynamicLogin(req, res, user, challenge.assessment, challenge.deviceKnown) });
+  res.json({
+    success: true,
+    message: emergency ? 'Emergency sign-in: this session is audited and ends automatically' : 'Login successful',
+    data: await completeDynamicLogin(req, res, user, challenge.assessment, challenge.deviceKnown, emergency),
+  });
 }
 
 /**
@@ -418,12 +468,14 @@ async function refreshToken(req, res) {
 
   await tokenService.revokeRefreshToken(decoded.userId, decoded.jti);
   await User.updateOne({ _id: user._id }, { $pull: { refreshTokens: tokenService.hashJTI(decoded.jti) } });
-  const access = await issueSession(res, user);
+  // An emergency session keeps its original end time: rotation never extends it.
+  const emergency = decoded.emergencyUntil ? { until: decoded.emergencyUntil, reason: decoded.emergencyReason } : null;
+  const access = await issueSession(res, user, emergency);
 
   res.json({
     success: true,
     message: 'Session refreshed',
-    data: { user: user.toJSON(), token: access.token, expiresIn: access.expiresIn },
+    data: { user: user.toJSON(), token: access.token, expiresIn: access.expiresIn, emergency: emergencyInfo(emergency) },
   });
 }
 

@@ -150,6 +150,84 @@ describe('after the first time: dynamic login algorithm', () => {
   });
 });
 
+describe('behaviour signal', () => {
+  test('two failed passwords since the last login cost 20 points: 95 becomes 75, medium risk', async () => {
+    const { cookies } = await registerAndFirstLogin();
+    const deviceOnly = cookies.filter((c) => c.startsWith('mcDevice='));
+    for (let i = 0; i < 2; i += 1) {
+      await post('/api/auth/login/dynamic', { cookies: deviceOnly }).send({ password: 'Wrong!Pass1', context: { gps: GPS_HYDERABAD } });
+    }
+    const mail = captureCodes();
+    const res = await post('/api/auth/login/dynamic', { cookies: deviceOnly }).send({ password: PASSWORD, context: { gps: GPS_HYDERABAD } });
+    mail.restore();
+    expect(res.body.data.mode).toBe('challenge');
+    expect(res.body.data.assessment.score).toBe(75);
+    expect(res.body.data.assessment.breakdown.behaviour).toMatchObject({ score: -20, failures: 2 });
+  });
+});
+
+describe('emergency sign-in (break-glass at login)', () => {
+  const REASON = 'Cardiac arrest in ICU bed 4, need medication history now';
+  const clinician = (role) => createUser(role, { loginCount: 3, securityQuestion: 'In which city were you born?', securityAnswerHash: 'Bengaluru' });
+
+  async function highRiskChallenge(user) {
+    const mail = captureCodes();
+    const res = await post('/api/auth/login/dynamic', { ip: UK_IP }).send({ email: user.email, password: PASSWORD, context: { gps: GPS_HYDERABAD } });
+    mail.restore();
+    expect(res.body.data.assessment.risk).toBe('high');
+    return { challenge: res.body.data, code: mail.codes[0] };
+  }
+
+  test('a doctor may give a reason instead of the security answer: short, audited session, browser not trusted', async () => {
+    const doctor = await clinician('doctor');
+    await createUser('admin');
+    const { challenge, code } = await highRiskChallenge(doctor);
+    expect(challenge.emergencyAllowed).toBe(true);
+
+    const res = await post('/api/auth/login/challenge', { ip: UK_IP }).send({ challengeId: challenge.challengeId, otp: code, emergencyReason: REASON });
+    expect(res.status).toBe(200);
+    expect(res.body.data.emergency.reason).toBe(REASON);
+    const minutesLeft = (new Date(res.body.data.emergency.until) - Date.now()) / 60000;
+    expect(minutesLeft).toBeGreaterThan(29);
+    expect(minutesLeft).toBeLessThanOrEqual(30);
+    expect(cookiesOf(res).some((c) => c.startsWith('mcDevice='))).toBe(false); // context not proved, so not remembered
+
+    const entry = await LedgerEntry.findOne({ chain: 'access', entityType: 'login_context', 'meta.reason': 'emergency_login' }).lean();
+    expect(entry.meta.emergencyReason).toBe(REASON);
+    const Notification = require('../../src/models/Notification');
+    expect(await Notification.countDocuments({ title: 'Emergency sign-in used' })).toBe(1);
+
+    // refreshing never extends the emergency window
+    const refreshed = await post('/api/auth/refresh-token', { ip: UK_IP, cookies: cookiesOf(res) }).send();
+    expect(refreshed.status).toBe(200);
+    expect(refreshed.body.data.emergency.until).toBe(res.body.data.emergency.until);
+  });
+
+  test('the emailed code is still required', async () => {
+    const doctor = await clinician('doctor');
+    const { challenge } = await highRiskChallenge(doctor);
+    const res = await post('/api/auth/login/challenge', { ip: UK_IP }).send({ challengeId: challenge.challengeId, otp: '000000', emergencyReason: REASON });
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('INVALID_OTP');
+  });
+
+  test('patients cannot use emergency sign-in', async () => {
+    const patient = await clinician('patient');
+    const { challenge, code } = await highRiskChallenge(patient);
+    expect(challenge.emergencyAllowed).toBe(false);
+    const res = await post('/api/auth/login/challenge', { ip: UK_IP }).send({ challengeId: challenge.challengeId, otp: code, emergencyReason: REASON });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('EMERGENCY_NOT_ALLOWED');
+  });
+
+  test('a reason shorter than 10 characters is rejected', async () => {
+    const doctor = await clinician('doctor');
+    const { challenge, code } = await highRiskChallenge(doctor);
+    const res = await post('/api/auth/login/challenge', { ip: UK_IP }).send({ challengeId: challenge.challengeId, otp: code, emergencyReason: 'urgent' });
+    expect(res.status).toBe(400);
+  });
+});
+
 describe('page load: dynamic routing', () => {
   test('live session at low risk goes straight to pending work', async () => {
     const { user, cookies } = await registerAndFirstLogin();

@@ -122,6 +122,15 @@
                             <input type="text" id="challengeAnswer" class="form-input" maxlength="100" placeholder="Your answer" autocomplete="off">
                         </div>
                     </div>
+                    <!-- Emergency sign-in: doctors and admins only, replaces the security question -->
+                    <div class="form-group emergency-block" id="challengeEmergencyBlock">
+                        <button type="button" id="challengeEmergencyToggle" class="emergency-toggle"><i data-lucide="siren" aria-hidden="true"></i> <span>Emergency? Sign in with a clinical reason instead</span></button>
+                        <div id="challengeEmergencyFields" hidden>
+                            <label for="challengeEmergencyReason" class="required">Clinical reason (at least 10 characters)</label>
+                            <textarea id="challengeEmergencyReason" class="form-input" minlength="10" maxlength="300" rows="3" placeholder="e.g. Cardiac arrest in ICU bed 4, need medication history"></textarea>
+                            <p class="emergency-note">The emailed code is still required. The session ends after 30 minutes, is written to the ledger, and administrators are notified.</p>
+                        </div>
+                    </div>
                     <div class="form-message" id="challengeMessage" role="alert"></div>
                     <div class="form-group">
                         <button type="submit" id="challengeSubmitBtn" class="submit-btn"><span>Verify and sign in</span><div class="loading-spinner" aria-hidden="true"></div><i data-lucide="check" aria-hidden="true"></i></button>

@@ -14,6 +14,7 @@
   let accessToken = null;
   let refreshing = null; // one shared in-flight refresh, however many calls hit 401 at once
   let breakGlassReason = null; // set only while the user has emergency access switched on
+  let emergencySession = null; // { until, reason } after an emergency sign-in
 
   class ApiError extends Error {
     constructor(status, message, body) {
@@ -43,6 +44,7 @@
         .then(parse)
         .then((body) => {
           accessToken = body.data.token;
+          emergencySession = body.data.emergency || null;
           return body.data.user;
         })
         .finally(() => { refreshing = null; });
@@ -117,6 +119,7 @@
     hasToken: () => Boolean(accessToken),
     setBreakGlass: (reason) => { breakGlassReason = reason || null; },
     getBreakGlass: () => breakGlassReason,
+    getEmergencySession: () => emergencySession,
     async logout() {
       try {
         await request('POST', '/api/auth/logout');

@@ -2213,3 +2213,12 @@ body.dark-mode .form-message[data-type="success"] { background: #064e3b; color: 
 .risk-track { height: 8px; border-radius: 4px; background: rgba(148, 163, 184, 0.25); overflow: hidden; }
 .risk-fill { height: 100%; border-radius: 4px; background: #14b8a6; }
 .risk-note { margin-left: 78px; opacity: 0.75; font-size: 0.75rem; }
+
+/* Emergency sign-in */
+.risk-penalty { color: #dc2626; font-size: 0.75rem; }
+.emergency-block { border-top: 1px dashed rgba(220, 38, 38, 0.4); padding-top: 0.75rem; }
+.emergency-toggle { display: inline-flex; align-items: center; gap: 0.4rem; background: none; border: 0; color: #dc2626; font-weight: 600; cursor: pointer; padding: 0; font-size: 0.85rem; }
+.emergency-toggle svg { width: 16px; height: 16px; }
+#challengeEmergencyFields { margin-top: 0.6rem; }
+#challengeEmergencyFields textarea { width: 100%; resize: vertical; padding: 0.6rem 0.8rem; }
+.emergency-note { font-size: 0.75rem; opacity: 0.8; margin-top: 0.4rem; }

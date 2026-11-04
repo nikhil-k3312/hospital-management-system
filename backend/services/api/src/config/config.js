@@ -69,6 +69,8 @@ const config = {
     highSensitivityTrustScore: toInt(env.HIGH_SENSITIVITY_TRUST_SCORE, 70),
     maxFailedLogins: toInt(env.MAX_FAILED_LOGINS, 5),
     lockMinutes: toInt(env.ACCOUNT_LOCK_MINUTES, 30),
+    // emergency sign-in (doctor/admin): how long the session lasts before a full login is needed
+    emergencySessionMinutes: toInt(env.EMERGENCY_SESSION_MINUTES, 30),
   },
 
   files: {

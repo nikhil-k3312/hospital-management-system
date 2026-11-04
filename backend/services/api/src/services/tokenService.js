@@ -22,14 +22,19 @@ class TokenService {
     return `refresh:${userId}:${this.hashJTI(jti)}`;
   }
 
-  /** Short-lived access token. The random jti lets us revoke this exact token. */
-  generateAccessToken(user) {
+  /**
+   * Short-lived access token. The random jti lets us revoke this exact token.
+   * An emergency session ({ emergencyUntil }, epoch seconds) carries emergency: true
+   * and never outlives the emergency window.
+   */
+  generateAccessToken(user, { emergencyUntil } = {}) {
     const jti = crypto.randomUUID();
-    const token = jwt.sign(
-      { userId: user._id.toString(), email: user.email, role: user.role, jti },
-      this.config.jwt.secret,
-      { expiresIn: this.config.jwt.expiry }
-    );
+    const claims = { userId: user._id.toString(), email: user.email, role: user.role, jti };
+    if (emergencyUntil) claims.emergency = true;
+    let token = jwt.sign(claims, this.config.jwt.secret, { expiresIn: this.config.jwt.expiry });
+    if (emergencyUntil && jwt.decode(token).exp > emergencyUntil) {
+      token = jwt.sign({ ...claims, exp: emergencyUntil }, this.config.jwt.secret);
+    }
     return { token, jti, expiresIn: this.config.jwt.expiry };
   }
 
@@ -37,21 +42,20 @@ class TokenService {
    * Long-lived refresh token, signed with a different secret. It is valid only
    * while its Redis key exists, so the server can revoke it at any time.
    */
-  async generateRefreshToken(user) {
+  async generateRefreshToken(user, { emergencyUntil, emergencyReason } = {}) {
     const userId = user._id.toString();
     const jti = crypto.randomUUID();
-    const token = jwt.sign(
-      { userId, jti, type: 'refresh' },
-      this.config.jwt.refreshSecret,
-      { expiresIn: `${this.config.jwt.refreshExpiryDays}d` }
-    );
+    // An emergency session keeps its fixed end time through every rotation.
+    const ttl = emergencyUntil ? Math.max(1, emergencyUntil - Math.floor(Date.now() / 1000)) : this.refreshTTLSeconds;
+    const payload = emergencyUntil ? { userId, jti, type: 'refresh', emergencyUntil, emergencyReason } : { userId, jti, type: 'refresh' };
+    const token = jwt.sign(payload, this.config.jwt.refreshSecret, { expiresIn: ttl });
     try {
-      await this.redis.setEx(this.refreshKey(userId, jti), this.refreshTTLSeconds, '1');
+      await this.redis.setEx(this.refreshKey(userId, jti), ttl, '1');
     } catch (error) {
       logger.error(`Error storing refresh token: ${error.message}`);
       throw new Error(REDIS_UNAVAILABLE);
     }
-    return { token, jti, jtiHash: this.hashJTI(jti) };
+    return { token, jti, jtiHash: this.hashJTI(jti), ttl };
   }
 
   async verifyAccessToken(token) {

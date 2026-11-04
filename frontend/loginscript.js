@@ -110,7 +110,9 @@
       ${row('Location', loc, loc.distanceKm !== null ? ` · ${loc.distanceKm} km between IP and GPS` : '')}
       ${row('Device', a.breakdown.device)}
       ${row('Time', a.breakdown.time)}
-      ${row('Network', a.breakdown.network)}`;
+      ${row('Network', a.breakdown.network)}
+      ${a.breakdown.behaviour && a.breakdown.behaviour.score < 0
+        ? `<div class="risk-row"><span>Behaviour</span><span class="risk-penalty">${esc(a.breakdown.behaviour.category)}</span><strong>${a.breakdown.behaviour.score}</strong></div>` : ''}`;
   }
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -134,13 +136,25 @@
 
   let challengeId = null;
 
+  /** Emergency sign-in: a clinical reason replaces the security question (doctor/admin only). */
+  let emergencyMode = false;
+  function setEmergency(on) {
+    emergencyMode = on;
+    $('challengeEmergencyFields').hidden = !on;
+    $('challengeEmergencyReason').value = '';
+    $('challengeQuestionBlock').style.display = on || !$('challengeQuestion').textContent ? 'none' : '';
+    $('challengeEmergencyToggle').querySelector('span').textContent = on
+      ? 'Answer the security question instead' : 'Emergency? Sign in with a clinical reason instead';
+  }
+
   /** Acts on the server's answer to a dynamic login: sign in, normal code step, or challenge. */
   function handleLoginResult(res, password) {
     const { data } = res;
     if (data.mode === 'redirect') {
       pending.password = '';
       api.setToken(data.token);
-      notify(`Welcome back, ${data.user.fullName}. ${data.landing.reason}.`);
+      if (data.emergency) notify(`Emergency sign-in until ${new Date(data.emergency.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}. Every action is audited.`, 'warning');
+      else notify(`Welcome back, ${data.user.fullName}. ${data.landing.reason}.`);
       setTimeout(() => redirectAfterLogin(data.user.role, data.landing), 600);
     } else if (data.mode === 'otp') {
       // First login after registration: the normal password + code flow.
@@ -161,6 +175,8 @@
       $('challengeQuestion').textContent = data.securityQuestion || '';
       $('challengeAnswer').value = '';
       $('challengeAnswer').required = Boolean(data.securityQuestion);
+      setEmergency(false);
+      $('challengeEmergencyBlock').style.display = data.emergencyAllowed ? '' : 'none';
       setMessage('challengeMessage', '');
       showForm('challengeForm');
       notify(res.message, 'info');
@@ -192,7 +208,11 @@
     const otp = $('challengeOtp').value.trim();
     if (!/^\d{6}$/.test(otp)) { setMessage('challengeMessage', 'Enter the 6-digit code from your email.'); return; }
     const body = { challengeId, otp };
-    if ($('challengeAnswer').required) body.securityAnswer = $('challengeAnswer').value;
+    if (emergencyMode) {
+      const reason = $('challengeEmergencyReason').value.trim();
+      if (reason.length < 10) { setMessage('challengeMessage', 'Give a clinical reason of at least 10 characters.'); return; }
+      body.emergencyReason = reason;
+    } else if ($('challengeAnswer').required) body.securityAnswer = $('challengeAnswer').value;
     const button = $('challengeSubmitBtn');
     setLoading(button, true);
     try {
@@ -402,6 +422,7 @@
     $('returningForm').addEventListener('submit', onQuickLogin);
     $('challengeForm').addEventListener('submit', onChallenge);
     $('challengeBackBtn').addEventListener('click', () => { challengeId = null; showForm('loginForm'); });
+    $('challengeEmergencyToggle').addEventListener('click', () => setEmergency(!emergencyMode));
     $('notMeBtn').addEventListener('click', () => showForm('loginForm'));
     $('verifyCodeBtn').addEventListener('click', onVerify);
     $('resendCodeBtn').addEventListener('click', async () => {

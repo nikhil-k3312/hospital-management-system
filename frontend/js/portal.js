@@ -110,6 +110,11 @@
     } else if (user.approvalStatus === 'rejected') {
       banners.push(`<div class="banner banner-danger">${icon('x-octagon')} Your verification was declined. ${esc(user.approvalNote || '')}</div>`);
     }
+    const emergency = api.getEmergencySession();
+    if (emergency) {
+      const ends = new Date(emergency.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      banners.push(`<div class="banner banner-warning">${icon('siren')} EMERGENCY SIGN-IN: this session ends at ${esc(ends)} and is audited. Reason: “${esc(emergency.reason)}”. Opening a patient's chart without consent still needs Emergency access.</div>`);
+    }
     if (api.getBreakGlass()) {
       banners.push(`<div class="banner banner-danger pulse-border">${icon('siren')} EMERGENCY ACCESS IS ON. Consent checks are bypassed: every access is written to the ledger and the patient is notified. Reason: “${esc(api.getBreakGlass())}”
         <button class="btn btn-sm btn-secondary" data-shell="break-glass-off">Turn off</button></div>`);
@@ -236,7 +241,7 @@
       danger: true,
       body: `<div class="banner banner-warning">${icon('alert-triangle')} Use only in a genuine emergency. It bypasses patient consent for this browser tab. Every access is written to the tamper-evident ledger, the patient is notified, and administrators review it.</div>
         <div class="form-group"><label for="bg-reason">Clinical reason (required, at least 10 characters)</label>
-        <textarea id="bg-reason" name="reason" required minlength="10" maxlength="300" placeholder="e.g. Unconscious patient in ER, need allergy and medication history"></textarea></div>`,
+        <textarea id="bg-reason" name="reason" required minlength="10" maxlength="300" placeholder="e.g. Unconscious patient in ER, need allergy and medication history">${esc((api.getEmergencySession() || {}).reason || '')}</textarea></div>`,
       onSubmit: ({ reason }) => {
         api.setBreakGlass(reason);
         renderBanners();

@@ -6,7 +6,8 @@ const { sha256 } = require('../utils/hash');
 /**
  * Dynamic login: a context-aware trust score computed on the server.
  *
- *   Trust score = Location (35) + Device (25) + Time (20) + Network (20)  = 0..100
+ *   Trust score = Location (35) + Device (25) + Time (20) + Network (20) - Behaviour penalty
+ *               clamped to 0..100
  *
  *   Location  distance between where the IP address is (offline GeoIP database) and
  *             where the browser says it is (GPS): < 50 km 35, < 350 km 20, farther 5
@@ -15,6 +16,8 @@ const { sha256 } = require('../utils/hash');
  *   Time      inside duty hours (hospital time zone) 20, otherwise 10
  *   Network   hospital network (configured address ranges) 20, a network this user
  *             signed in from before 15, a new network 5
+ *   Behaviour failed attempts (password, code or security answer) since the last
+ *             successful login: minus 10 each, at most minus 30
  *
  *   score > 80   low risk     password only
  *   50 - 80      medium risk  password + emailed code
@@ -24,6 +27,7 @@ const { sha256 } = require('../utils/hash');
  * the IP and of the network prefix are stored; GPS coordinates are used and discarded.
  */
 const WEIGHTS = { location: 35, device: 25, time: 20, network: 20 };
+const BEHAVIOUR_PENALTY = { perFailure: 10, max: 30 };
 const MAX_KNOWN_NETWORKS = 10;
 
 function haversineKm(lat1, lon1, lat2, lon2) {
@@ -77,6 +81,7 @@ function validGps(gps) {
 
 const service = {
   WEIGHTS,
+  BEHAVIOUR_PENALTY,
 
   /** Offline lookup (MaxMind GeoLite data bundled with geoip-lite): no request leaves the server. */
   lookupGeo(ip) {
@@ -107,6 +112,12 @@ const service = {
     return { score: onDuty ? 20 : 10, category: onDuty ? 'Duty hours' : 'Off hours', hour };
   },
 
+  behaviourPenalty(user) {
+    const failures = user.failedLoginAttempts || 0;
+    const penalty = Math.min(BEHAVIOUR_PENALTY.max, failures * BEHAVIOUR_PENALTY.perFailure);
+    return { score: penalty ? -penalty : 0, failures, category: failures ? `${failures} failed attempt(s) since the last login` : 'No failed attempts' };
+  },
+
   tierFor(score) {
     if (score > 80) return { risk: 'low', tier: 'full', factors: ['password'] };
     if (score >= 50) return { risk: 'medium', tier: 'limited', factors: ['password', 'otp'] };
@@ -128,7 +139,8 @@ const service = {
     const device = { score: deviceKnown ? 25 : 10, category: deviceKnown ? 'Trusted browser' : 'New browser' };
     const time = service.timeScore(now);
     const network = service.networkScore(ip, user);
-    const score = Math.max(0, Math.min(100, location.score + device.score + time.score + network.score));
+    const behaviour = service.behaviourPenalty(user);
+    const score = Math.max(0, Math.min(100, location.score + device.score + time.score + network.score + behaviour.score));
     const { risk, tier, factors } = service.tierFor(score);
 
     // Without a security question on file, the strongest factor available is the emailed code.
@@ -145,6 +157,7 @@ const service = {
         device: { ...device, max: WEIGHTS.device },
         time: { ...time, max: WEIGHTS.time },
         network: { ...network, max: WEIGHTS.network },
+        behaviour: { ...behaviour, max: 0, min: -BEHAVIOUR_PENALTY.max },
       },
       ipHash: sha256(ip),
       networkPrefixHash: sha256(networkPrefix(ip)),
