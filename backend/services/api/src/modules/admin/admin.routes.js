@@ -20,6 +20,8 @@ const tokenService = require('../../services/tokenService');
 const ledgerService = require('../../services/ledgerService');
 const emailService = require('../../services/emailService');
 const notificationService = require('../../services/notificationService');
+const roleService = require('../../services/roleService');
+const { RoleService, ROLE_CODE } = require('../../services/roleService');
 
 const router = express.Router();
 router.use(authenticate, requireRole('admin'));
@@ -130,7 +132,104 @@ router.patch('/doctors/:id/verify', validate({
     message: approved ? 'Your credentials were verified. All features are now available.' : `Your verification was declined. ${req.body.note}`,
   });
   emailService.sendApprovalDecision(user.email, user.fullName, approved, req.body.note);
-  res.json({ success: true, message: `Account ${approved ? 'approved' : 'rejected'}`, data: user });
+  // Problem 26: with the on-chain registry, this approval is only the off-chain check of the
+  // credentials; the role becomes valid once k administrators approve it on-chain.
+  const registry = approved && roleService.enabled ? { proposeTx: roleService.proposeTx({ action: 'grant', userId: user._id.toString(), role: user.role }) } : null;
+  res.json({
+    success: true,
+    message: registry ? 'Credentials approved. Now propose the role in the role registry (needs approval by other administrators).' : `Account ${approved ? 'approved' : 'rejected'}`,
+    data: user,
+    registry,
+  });
+}));
+
+/* ---------------------------------------------------------------- authenticator reset */
+
+/** POST /api/admin/users/:id/reset-totp: a user lost their phone; they set up a new app at the next sign-in. */
+router.post('/users/:id/reset-totp', validate({ params: Joi.object({ id: objectId().required() }) }), asyncHandler(async (req, res) => {
+  const user = await User.findById(req.params.id);
+  if (!user) throw notFound('User not found');
+  Object.assign(user, { totpEnabled: false, totpSecretEnc: '', totpPendingEnc: '', totpLastStep: null, totpEnabledAt: null });
+  await user.save({ validateBeforeSave: false });
+  await invalidateSession(user._id);
+  await tokenService.revokeAllRefreshTokens(user._id.toString()); // sessions proven with the old app end
+  await ledgerService.append({
+    chain: 'records', entityType: 'user', entityId: user._id, action: 'TOTP_RESET',
+    actorId: req.user.userId, actorRole: 'admin', payload: { totpEnabled: false },
+  });
+  res.json({ success: true, message: 'Authenticator reset. The user sets up a new one at the next sign-in.' });
+}));
+
+/* ---------------------------------------------------------------- on-chain role registry (Problem 26) */
+
+/** Staff accounts keyed by their on-chain subject hash. */
+async function staffBySubject() {
+  const staff = await User.find({ role: { $in: roleService.STAFF_ROLES } }).select('fullName email role approvalStatus isActive').lean();
+  return new Map(staff.map((u) => [RoleService.subjectOf(u._id.toString()), { _id: u._id, fullName: u.fullName, email: u.email, role: u.role, approvalStatus: u.approvalStatus, isActive: u.isActive }]));
+}
+
+const requireRegistry = () => {
+  if (!roleService.enabled) throw badRequest('The on-chain role registry is not configured (ROLE_REGISTRY_ADDRESS).');
+};
+
+/** GET /api/admin/roles/registry: contract status and every staff account with its on-chain role. */
+router.get('/roles/registry', asyncHandler(async (req, res) => {
+  if (!roleService.enabled) return res.json({ success: true, data: { enabled: false } });
+  const [status, bySubject] = await Promise.all([roleService.status(), staffBySubject()]);
+  const staff = await Promise.all([...bySubject.values()].map(async (u) => {
+    let onChain = null;
+    try {
+      const code = await roleService.roleCode(u._id.toString());
+      onChain = Object.keys(ROLE_CODE).find((k) => ROLE_CODE[k] === code) || null;
+    } catch (error) { onChain = 'unavailable'; }
+    return { ...u, onChain };
+  }));
+  res.json({ success: true, data: { ...status, staff } });
+}));
+
+/** GET /api/admin/roles/proposals: newest proposals, with the staff account they concern. */
+router.get('/roles/proposals', asyncHandler(async (req, res) => {
+  requireRegistry();
+  res.json({ success: true, data: await roleService.proposals({ subjectToUser: await staffBySubject() }) });
+}));
+
+/**
+ * POST /api/admin/roles/proposals: builds the transaction an administrator signs with their own
+ * wallet. The server holds no administrator key; the proposer's signature counts as approval 1.
+ *   { action: 'grant' | 'revoke', userId }   { action: 'add_governor' | 'remove_governor', account }
+ *   { action: 'set_threshold', newThreshold }
+ */
+router.post('/roles/proposals', validate({ body: Joi.object({
+  action: Joi.string().valid('grant', 'revoke', 'add_governor', 'remove_governor', 'set_threshold').required(),
+  userId: Joi.when('action', { is: Joi.valid('grant', 'revoke'), then: objectId().required(), otherwise: Joi.forbidden() }),
+  account: Joi.when('action', { is: Joi.valid('add_governor', 'remove_governor'), then: Joi.string().pattern(/^0x[0-9a-fA-F]{40}$/).required(), otherwise: Joi.forbidden() }),
+  newThreshold: Joi.when('action', { is: 'set_threshold', then: Joi.number().integer().min(1).max(50).required(), otherwise: Joi.forbidden() }),
+}) }), asyncHandler(async (req, res) => {
+  requireRegistry();
+  const { action, userId, account, newThreshold } = req.body;
+  let role;
+  if (userId) {
+    const user = await User.findById(userId);
+    if (!user || !roleService.STAFF_ROLES.includes(user.role)) throw badRequest('Only doctors, insurance agents and administrators are registered on-chain.');
+    // the licence/employer check happens off-chain first (Verification page)
+    if (action === 'grant' && user.approvalStatus !== 'approved') throw conflict('Verify the credentials first (Verification page).', 'NOT_VERIFIED');
+    role = user.role;
+  }
+  res.json({ success: true, data: { tx: roleService.proposeTx({ action, userId, role, account, newThreshold }) } });
+}));
+
+/** POST /api/admin/roles/proposals/:id/approve: transaction for another administrator's approval. */
+router.post('/roles/proposals/:id/approve', validate({ params: Joi.object({ id: Joi.number().integer().min(0).required() }) }), asyncHandler(async (req, res) => {
+  requireRegistry();
+  res.json({ success: true, data: { tx: roleService.approveTx(req.params.id) } });
+}));
+
+/** POST /api/admin/roles/refresh { userId }: drop the cached role after a transaction was mined. */
+router.post('/roles/refresh', validate({ body: Joi.object({ userId: objectId().required() }) }), asyncHandler(async (req, res) => {
+  requireRegistry();
+  await roleService.invalidate(req.body.userId);
+  await invalidateSession(req.body.userId);
+  res.json({ success: true });
 }));
 
 /* ---------------------------------------------------------------- statistics */

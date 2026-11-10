@@ -74,7 +74,12 @@
         <button class="btn btn-sm btn-danger" data-action="reject" data-id="${u._id}">Reject</button></div></div>`).join('')
       : UI.emptyHtml('Nobody is waiting', 'Doctors and insurance agents who register themselves appear here.', 'check-circle'));
     c.on({
-      approve: (el) => c.act(() => c.api.patch(`/api/admin/doctors/${el.dataset.id}/verify`, { decision: 'approve' }), { success: 'Approved. The account can now use clinical features.' }),
+      approve: (el) => c.act(async () => {
+        const res = await c.api.patch(`/api/admin/doctors/${el.dataset.id}/verify`, { decision: 'approve' });
+        // Problem 26: with the on-chain registry the role still needs k administrators' approval
+        if (res.registry) await Wallet.send(res.registry.proposeTx, 'Role proposed on-chain. Another administrator must approve it on the Role Registry page.');
+        return res;
+      }, { success: 'Credentials approved.' }),
       reject: (el) => UI.modal({
         title: 'Reject verification',
         submitLabel: 'Reject',
@@ -82,6 +87,90 @@
         body: '<div class="form-group"><label>Reason (sent to the applicant)</label><textarea name="note" required maxlength="500"></textarea></div>',
         onSubmit: async (v) => { await c.api.patch(`/api/admin/doctors/${el.dataset.id}/verify`, { decision: 'reject', note: v.note }); UI.toast('Rejected', 'info'); c.reload(); },
       }),
+    });
+  }
+
+  /* ================================================================ on-chain role registry */
+
+  /**
+   * Administrators sign role changes with their OWN wallet (MetaMask or a compatible browser
+   * wallet). The server only builds the transaction data and never holds an administrator key.
+   */
+  const Wallet = {
+    async account() {
+      if (!window.ethereum) throw new Error('No browser wallet found. Install MetaMask and connect it to the hospital network.');
+      const [account] = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      return account;
+    },
+    async waitForReceipt(hash) {
+      for (let i = 0; i < 60; i += 1) {
+        const receipt = await window.ethereum.request({ method: 'eth_getTransactionReceipt', params: [hash] });
+        if (receipt) {
+          if (receipt.status !== '0x1') throw new Error('The transaction was rejected by the contract (for example: already approved, expired, or not a governor).');
+          return receipt;
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      throw new Error('The transaction was not mined within a minute. Check the wallet.');
+    },
+    async send(tx, successText) {
+      const from = await Wallet.account();
+      const hash = await window.ethereum.request({ method: 'eth_sendTransaction', params: [{ from, to: tx.to, data: tx.data }] });
+      UI.toast('Transaction sent, waiting for the network…', 'info');
+      await Wallet.waitForReceipt(hash);
+      if (successText) UI.toast(successText, 'success');
+      return hash;
+    },
+  };
+
+  async function roles(c) {
+    const reg = (await c.api.get('/api/admin/roles/registry')).data;
+    if (c.stale()) return;
+    if (!reg.enabled) {
+      c.container.innerHTML = UI.card('Role registry', 'key-round', UI.emptyHtml('Not configured',
+        'Set ROLE_REGISTRY_ADDRESS (and CHAIN_RPC_URL) to require k-of-n administrator approval of staff roles on-chain. Until then MongoDB decides roles.', 'info'));
+      return;
+    }
+    const proposals = (await c.api.get('/api/admin/roles/proposals')).data;
+    if (c.stale()) return;
+    const state = (p) => (p.executed ? tag('active', 'Executed') : p.cancelled ? tag('inactive', 'Cancelled')
+      : new Date(p.expiresAt) < new Date() ? tag('denied', 'Expired') : tag('pending', `${p.approvals}/${reg.threshold} approvals`));
+    const what = (p) => (p.user ? `${esc(titleCase(p.action))} ${esc(titleCase(p.role || ''))}: <strong>${esc(p.user.fullName)}</strong>`
+      : p.account ? `${esc(titleCase(p.action))} <span class="mono">${esc(p.account)}</span>` : `${esc(titleCase(p.action))} ${p.newThreshold || ''}`);
+
+    c.container.innerHTML = `
+      ${UI.card('Role registry', 'key-round', `<dl class="kv">
+        <dt>Contract</dt><dd class="mono">${esc(reg.address)}</dd>
+        <dt>Rule</dt><dd>${reg.threshold} of ${reg.governorCount} administrators must approve every staff role change</dd>
+        <dt>Bootstrap</dt><dd>${reg.bootstrapOpen ? tag('pending', 'Open: run the bootstrap script, then close it') : tag('active', 'Closed')}</dd></dl>`)}
+      ${UI.card('Staff accounts', 'users', UI.table([
+        { label: 'User', render: (u) => `<strong>${esc(u.fullName)}</strong><br><span class="text-muted text-small">${esc(u.email)}</span>` },
+        { label: 'Role (database)', render: (u) => `${esc(titleCase(u.role))} ${tag(u.approvalStatus)}` },
+        { label: 'Role (on-chain)', render: (u) => (u.onChain === u.role ? tag('active', titleCase(u.onChain)) : u.onChain ? tag('denied', titleCase(u.onChain)) : tag('inactive', 'None')) },
+        { label: '', render: (u) => (u.onChain === u.role
+          ? `<button class="btn btn-sm btn-danger" data-action="propose" data-kind="revoke" data-id="${u._id}">Propose revoke</button>`
+          : `<button class="btn btn-sm btn-primary" data-action="propose" data-kind="grant" data-id="${u._id}" ${u.approvalStatus === 'approved' ? '' : 'disabled title="Verify the credentials first"'}>Propose grant</button>`) },
+      ], reg.staff, 'No staff accounts'))}
+      ${UI.card('Proposals', 'list-checks', UI.table([
+        { label: '#', render: (p) => String(p.id) },
+        { label: 'Change', render: what },
+        { label: 'Proposed by', render: (p) => `<span class="mono text-small">${esc(shortHash(p.proposer, 12))}</span><br><span class="text-muted text-small">${esc(relTime(p.createdAt))}</span>` },
+        { label: 'State', render: state },
+        { label: '', render: (p) => (!p.executed && !p.cancelled && new Date(p.expiresAt) > new Date()
+          ? `<button class="btn btn-sm btn-primary" data-action="approve-proposal" data-id="${p.id}" data-user="${p.user ? p.user._id : ''}">Approve with my wallet</button>` : '') },
+      ], proposals, 'No proposals yet'))}`;
+
+    c.on({
+      propose: (el) => c.act(async () => {
+        const { data } = await c.api.post('/api/admin/roles/proposals', { action: el.dataset.kind, userId: el.dataset.id });
+        await Wallet.send(data.tx, 'Proposal created (your signature counts as the first approval).');
+        await c.api.post('/api/admin/roles/refresh', { userId: el.dataset.id });
+      }, { success: false }),
+      'approve-proposal': (el) => c.act(async () => {
+        const { data } = await c.api.post(`/api/admin/roles/proposals/${el.dataset.id}/approve`);
+        await Wallet.send(data.tx, 'Approval recorded on-chain.');
+        if (el.dataset.user) await c.api.post('/api/admin/roles/refresh', { userId: el.dataset.user });
+      }, { success: false }),
     });
   }
 
@@ -105,7 +194,8 @@
         { label: 'Status', render: (u) => (u.isActive ? tag('active') : tag('inactive', 'Deactivated')) },
         { label: 'Last login', render: (u) => esc(u.lastLogin ? relTime(u.lastLogin) : 'never') },
         { label: '', render: (u) => (u._id === c.user._id ? '<span class="text-muted text-small">You</span>'
-          : `<button class="btn btn-sm ${u.isActive ? 'btn-danger' : 'btn-primary'}" data-action="toggle" data-id="${u._id}" data-active="${u.isActive}">${u.isActive ? 'Deactivate' : 'Activate'}</button>`) },
+          : `<button class="btn btn-sm ${u.isActive ? 'btn-danger' : 'btn-primary'}" data-action="toggle" data-id="${u._id}" data-active="${u.isActive}">${u.isActive ? 'Deactivate' : 'Activate'}</button>
+             ${u.totpEnabled ? `<button class="btn btn-sm btn-secondary" data-action="reset-totp" data-id="${u._id}" title="The user lost their authenticator app">Reset app</button>` : ''}`) },
       ], res.data, 'No users match')}`, `<button class="btn btn-primary" data-action="create">${icon('user-plus')} Create staff account</button>`);
 
     const filterForm = c.container.querySelector('[data-filters]');
@@ -117,6 +207,10 @@
     filterForm.addEventListener('submit', (e) => e.preventDefault());
 
     c.on({
+      'reset-totp': async (el) => {
+        if (!(await UI.confirmDialog('Reset authenticator app', 'Use this only when the user lost their phone. Their sessions end and they set up a new app at the next sign-in. The reset is written to the ledger.', { confirmLabel: 'Reset', danger: true }))) return;
+        await c.act(() => c.api.post(`/api/admin/users/${el.dataset.id}/reset-totp`));
+      },
       toggle: async (el) => {
         const deactivate = el.dataset.active === 'true';
         if (deactivate && !(await UI.confirmDialog('Deactivate account', 'The user is signed out everywhere and cut off within seconds, even with a valid token.', { confirmLabel: 'Deactivate', danger: true }))) return;
@@ -354,11 +448,12 @@
       { group: 'Security', items: [
         { id: 'ledger', label: 'Ledger', icon: 'link', title: 'Blockchain Ledger' },
         { id: 'access', label: 'Access Control', icon: 'shield', title: 'Access Control Audit' },
+        { id: 'roles', label: 'Role Registry', icon: 'key-round', title: 'On-chain Role Registry (k of n)' },
         { id: 'notifications', label: 'Notifications', icon: 'bell', badge: 'notifications' },
         { id: 'profile', label: 'Profile & Security', icon: 'settings' },
       ] },
     ],
-    pages: { dashboard, verification, users, ledger, access, devices, reports, settings },
+    pages: { dashboard, verification, users, ledger, access, devices, reports, settings, roles },
     badges: async ({ api, setBadge }) => {
       const res = await api.get('/api/admin/doctors/pending-verification');
       setBadge('badge-verification', res.data.length);

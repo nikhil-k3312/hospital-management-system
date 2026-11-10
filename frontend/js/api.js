@@ -89,9 +89,19 @@
         await refreshSession();
       } catch (refreshError) {
         accessToken = null;
+        // Problem 8: the network or browser changed, or the session reached its maximum length
+        if (refreshError.code === 'REAUTH_REQUIRED' && typeof location !== 'undefined') {
+          location.replace(`/login.html?reauth=${encodeURIComponent(refreshError.message)}`);
+        }
         throw new ApiError(401, 'Your session has ended. Please log in again.', { code: 'SESSION_ENDED' });
       }
       return request(method, path, { body, query, form, retry: false });
+    }
+    // D1: staff without an authenticator app are sent to set it up
+    if (response.status === 403 && typeof location !== 'undefined' && !path.startsWith('/api/auth/')) {
+      const copy = response.clone();
+      const peek = await copy.json().catch(() => null);
+      if (peek && peek.code === 'TOTP_ENROLMENT_REQUIRED') location.replace('/login.html?totp=1');
     }
     return parse(response);
   }

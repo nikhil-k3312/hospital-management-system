@@ -6,7 +6,10 @@
     "compile": "hardhat compile",
     "test": "hardhat test",
     "node": "hardhat node",
-    "deploy:local": "hardhat run scripts/deploy.js --network localhost"
+    "deploy:local": "hardhat run scripts/deploy.js --network localhost",
+    "deploy:roles:local": "hardhat run scripts/deployRoleRegistry.js --network localhost",
+    "deploy:besu": "hardhat run scripts/deploy.js --network besu",
+    "deploy:roles:besu": "hardhat run scripts/deployRoleRegistry.js --network besu"
   },
   "license": "ISC",
   "devDependencies": {

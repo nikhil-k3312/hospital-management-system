@@ -4,6 +4,14 @@ const emailService = require('../../src/services/emailService');
 const AccessGrant = require('../../src/models/AccessGrant');
 const LedgerEntry = require('../../src/models/LedgerEntry');
 const User = require('../../src/models/User');
+const totpService = require('../../src/services/totpService');
+
+/** Gives a user an enrolled authenticator app directly in the database; returns the secret. */
+async function enrolTotp(userId) {
+  const secret = totpService.newSecret();
+  await User.updateOne({ _id: userId }, { $set: { totpEnabled: true, totpSecretEnc: totpService.encryptSecret(secret), totpLastStep: null } });
+  return secret;
+}
 
 // geoip-lite places 49.207.0.1 in Hyderabad and 81.2.69.142 in St Albans (UK).
 const HYDERABAD_IP = '49.207.0.1';
@@ -73,38 +81,57 @@ describe('after the first time: dynamic login algorithm', () => {
     expect(mail.codes).toHaveLength(0); // no code needed at low risk
   });
 
-  test('new browser on a new network with GPS far from the IP = 40, high risk: code + security question', async () => {
-    await registerAndFirstLogin();
+  test('new browser on a new network with GPS far from the IP = 40, high risk: code + authenticator app', async () => {
+    const { user } = await registerAndFirstLogin();
+    const secret = await enrolTotp(user._id);
     const mail = captureCodes();
     const res = await post('/api/auth/login/dynamic', { ip: UK_IP }).send({ email: 'arjun@example.com', password: PASSWORD, context: { gps: GPS_HYDERABAD } });
     expect(res.body.data.mode).toBe('challenge');
     expect(res.body.data.assessment.score).toBe(40); // 5 + 10 + 20 + 5
     expect(res.body.data.assessment.risk).toBe('high');
-    expect(res.body.data.assessment.factors).toEqual(['password', 'otp', 'security_question']);
-    expect(res.body.data.securityQuestion).toBe('In which city were you born?');
+    expect(res.body.data.assessment.factors).toEqual(['password', 'otp', 'totp']);
+    expect(res.body.data.totpRequired).toBe(true);
+    expect(res.body.data.securityQuestion).toBeNull(); // the security question is no longer used
     expect(res.body.data.assessment.breakdown.location.distanceKm).toBeGreaterThan(7000);
 
-    const wrong = await post('/api/auth/login/challenge', { ip: UK_IP }).send({ challengeId: res.body.data.challengeId, otp: mail.codes[0], securityAnswer: 'Delhi' });
-    expect(wrong.status).toBe(401);
-    expect(wrong.body.code).toBe('INVALID_SECURITY_ANSWER');
+    // the emailed code alone is not enough at high risk
+    const codeOnly = await post('/api/auth/login/challenge', { ip: UK_IP }).send({ challengeId: res.body.data.challengeId, otp: mail.codes[0] });
+    expect(codeOnly.status).toBe(401);
+    expect(codeOnly.body.code).toBe('INVALID_TOTP');
 
     const retry = await post('/api/auth/login/dynamic', { ip: UK_IP }).send({ email: 'arjun@example.com', password: PASSWORD, context: { gps: GPS_HYDERABAD } });
-    const ok = await post('/api/auth/login/challenge', { ip: UK_IP }).send({ challengeId: retry.body.data.challengeId, otp: mail.codes[1], securityAnswer: '  bengaluru ' });
-    mail.restore();
+    const code = totpService.codeAt(secret);
+    const ok = await post('/api/auth/login/challenge', { ip: UK_IP }).send({ challengeId: retry.body.data.challengeId, otp: mail.codes[1], totp: code });
     expect(ok.status).toBe(200);
     expect(ok.body.data.mode).toBe('redirect');
     expect(cookiesOf(ok).some((c) => c.startsWith('mcDevice='))).toBe(true); // this browser is now trusted
+
+    // the same authenticator code cannot be used twice (replay)
+    const third = await post('/api/auth/login/dynamic', { ip: UK_IP, ua: 'other-browser' }).send({ email: 'arjun@example.com', password: PASSWORD, context: { gps: GPS_HYDERABAD } });
+    const replay = await post('/api/auth/login/challenge', { ip: UK_IP, ua: 'other-browser' }).send({ challengeId: third.body.data.challengeId, otp: mail.codes[2], totp: code });
+    mail.restore();
+    expect(replay.status).toBe(401);
+    expect(replay.body.code).toBe('TOTP_REUSED');
   });
 
-  test('trusted browser with no GPS = 75, medium risk: emailed code only', async () => {
+  test('trusted browser with no GPS = 75: password only for a patient (65), emailed code for an admin (80)', async () => {
     const { cookies } = await registerAndFirstLogin();
     const mail = captureCodes();
     const res = await post('/api/auth/login/dynamic', { cookies }).send({ password: PASSWORD, context: { gps: null } });
-    expect(res.body.data.mode).toBe('challenge');
     expect(res.body.data.assessment.score).toBe(75); // 15 unknown location + 25 + 20 + 15
-    expect(res.body.data.assessment.factors).toEqual(['password', 'otp']);
-    expect(res.body.data.securityQuestion).toBeNull();
-    const ok = await post('/api/auth/login/challenge', { cookies }).send({ challengeId: res.body.data.challengeId, otp: mail.codes[0] });
+    expect(res.body.data.mode).toBe('redirect');
+    expect(res.body.data.assessment.thresholds).toEqual({ upper: 65, lower: 50 });
+
+    const admin = await createUser('admin');
+    const first = await post('/api/auth/login/dynamic').send({ email: admin.email, password: PASSWORD, context: { gps: GPS_HYDERABAD } });
+    expect(first.body.data.mode).toBe('otp');
+    const step2 = await post('/api/auth/login/verify-otp').send({ email: admin.email, otp: mail.codes[0] });
+    const adminCookies = cookiesOf(step2);
+    const second = await post('/api/auth/login/dynamic', { cookies: adminCookies }).send({ password: PASSWORD, context: { gps: null } });
+    expect(second.body.data.assessment.score).toBe(75);
+    expect(second.body.data.mode).toBe('challenge');
+    expect(second.body.data.assessment.factors).toEqual(['password', 'otp']);
+    const ok = await post('/api/auth/login/challenge', { cookies: adminCookies }).send({ challengeId: second.body.data.challengeId, otp: mail.codes[1] });
     mail.restore();
     expect(ok.status).toBe(200);
   });
@@ -121,13 +148,16 @@ describe('after the first time: dynamic login algorithm', () => {
     expect(res.body.data.assessment.score).toBe(90);
   });
 
-  test('without a security question on file, high risk asks for the emailed code', async () => {
+  test('high risk without an authenticator app: a patient is refused, no code is sent (Problem 2)', async () => {
     const patient = await createUser('patient', { loginCount: 3 });
     const mail = captureCodes();
     const res = await post('/api/auth/login/dynamic', { ip: UK_IP }).send({ email: patient.email, password: PASSWORD, context: { gps: GPS_HYDERABAD } });
     mail.restore();
-    expect(res.body.data.assessment.risk).toBe('high');
-    expect(res.body.data.assessment.factors).toEqual(['password', 'otp']);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('TOTP_NOT_ENROLLED');
+    expect(mail.codes).toHaveLength(0);
+    const entry = await LedgerEntry.findOne({ chain: 'access', entityType: 'login_context', 'meta.reason': 'totp_not_enrolled' }).lean();
+    expect(entry.action).toBe('DENY');
   });
 
   test('a wrong password is refused before any context decision', async () => {
@@ -161,7 +191,8 @@ describe('behaviour signal', () => {
     const res = await post('/api/auth/login/dynamic', { cookies: deviceOnly }).send({ password: PASSWORD, context: { gps: GPS_HYDERABAD } });
     mail.restore();
     expect(res.body.data.mode).toBe('challenge');
-    expect(res.body.data.assessment.score).toBe(75);
+    expect(res.body.data.assessment.score).toBe(75); // still above 65, but the failure gate (Problem 5) applies
+    expect(res.body.data.assessment.gate).toBe('failure');
     expect(res.body.data.assessment.breakdown.behaviour).toMatchObject({ score: -20, failures: 2 });
   });
 });
@@ -178,11 +209,12 @@ describe('emergency sign-in (break-glass at login)', () => {
     return { challenge: res.body.data, code: mail.codes[0] };
   }
 
-  test('a doctor may give a reason instead of the security answer: short, audited session, browser not trusted', async () => {
+  test('a verified doctor without an authenticator may give a reason: short, audited session, browser not trusted', async () => {
     const doctor = await clinician('doctor');
     await createUser('admin');
     const { challenge, code } = await highRiskChallenge(doctor);
     expect(challenge.emergencyAllowed).toBe(true);
+    expect(challenge.emergencyOnly).toBe(true); // no authenticator app: emergency is the only way
 
     const res = await post('/api/auth/login/challenge', { ip: UK_IP }).send({ challengeId: challenge.challengeId, otp: code, emergencyReason: REASON });
     expect(res.status).toBe(200);
@@ -211,8 +243,17 @@ describe('emergency sign-in (break-glass at login)', () => {
     expect(res.body.code).toBe('INVALID_OTP');
   });
 
+  test('a doctor awaiting verification is not offered emergency sign-in (Problem 9)', async () => {
+    const doctor = await clinician('doctor');
+    await User.updateOne({ _id: doctor._id }, { $set: { approvalStatus: 'pending' } });
+    const res = await post('/api/auth/login/dynamic', { ip: UK_IP }).send({ email: doctor.email, password: PASSWORD, context: { gps: GPS_HYDERABAD } });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('TOTP_NOT_ENROLLED');
+  });
+
   test('patients cannot use emergency sign-in', async () => {
     const patient = await clinician('patient');
+    await enrolTotp(patient._id);
     const { challenge, code } = await highRiskChallenge(patient);
     expect(challenge.emergencyAllowed).toBe(false);
     const res = await post('/api/auth/login/challenge', { ip: UK_IP }).send({ challengeId: challenge.challengeId, otp: code, emergencyReason: REASON });
@@ -240,7 +281,8 @@ describe('page load: dynamic routing', () => {
 
   test('live session but higher risk shows the welcome-back form with the factors needed', async () => {
     const { cookies } = await registerAndFirstLogin();
-    const res = await post('/api/auth/route', { cookies }).send({ context: { gps: null } });
+    // trusted browser, but from a new network far from the GPS position: 5 + 25 + 20 + 5 = 55
+    const res = await post('/api/auth/route', { cookies, ip: UK_IP }).send({ context: { gps: GPS_HYDERABAD } });
     expect(res.body.data.mode).toBe('returning');
     expect(res.body.data.firstName).toBe('Arjun');
     expect(res.body.data.assessment.factors).toEqual(['password', 'otp']);

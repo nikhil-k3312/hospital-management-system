@@ -10,6 +10,7 @@ require('../src/config/config');
 const { connectMongo, disconnectMongo } = require('../src/db/mongo');
 const ledgerService = require('../src/services/ledgerService');
 const blockchainService = require('../src/services/blockchainService');
+const anchorService = require('../src/services/anchorService');
 const MedicalRecord = require('../src/models/MedicalRecord');
 const { hashObject } = require('../src/utils/hash');
 
@@ -49,13 +50,11 @@ async function main() {
     await record.save();
   }
 
-  // One more anchor seals the whole ledger up to now: its head hash depends on every entry before it.
-  const head = await ledgerService.verifyChain('records');
-  if (head.valid && head.headHash) {
-    const result = await blockchainService.anchor({ entityType: 'ledger', entityId: 'records', version: head.entriesChecked, dataHash: head.headHash });
-    console.log(`ledger head (${head.entriesChecked} entries): ${result.status}`);
-  } else if (!head.valid) {
-    console.log(`records ledger is BROKEN at entry #${head.brokenAtSeq}: head not anchored`);
+  // One more anchor per chain seals the whole ledger up to now: a head hash depends on every entry
+  // before it (Problem 10). Tampered chains are refused by anchorService.
+  for (const result of await anchorService.anchorAll('retry')) {
+    console.log(`ledger "${result.chain}" head${result.seq !== undefined ? ` #${result.seq}` : ''}: ${result.status}${result.problem ? ` (${result.problem})` : ''}`);
+    if (result.status === 'refused') refused += 1;
   }
 
   console.log(`anchored ${anchored}, refused ${refused}`);

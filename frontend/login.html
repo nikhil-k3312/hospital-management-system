@@ -115,6 +115,15 @@
                             <input type="text" id="challengeOtp" class="form-input" inputmode="numeric" maxlength="6" placeholder="6-digit code" autocomplete="one-time-code" required>
                         </div>
                     </div>
+                    <!-- High risk (CARMA): code from the authenticator app -->
+                    <div class="form-group" id="challengeTotpBlock" style="display:none">
+                        <label for="challengeTotp" class="required">Authenticator app code</label>
+                        <div class="input-wrapper">
+                            <i class="input-icon" data-lucide="smartphone" aria-hidden="true"></i>
+                            <input type="text" id="challengeTotp" class="form-input" inputmode="numeric" maxlength="6" placeholder="6-digit code from the app" autocomplete="one-time-code">
+                        </div>
+                    </div>
+                    <!-- Security question: baseline B2 (CONTEXT_PROFILE=v3) only -->
                     <div class="form-group" id="challengeQuestionBlock">
                         <label for="challengeAnswer" class="required" id="challengeQuestion"></label>
                         <div class="input-wrapper">
@@ -128,13 +137,39 @@
                         <div id="challengeEmergencyFields" hidden>
                             <label for="challengeEmergencyReason" class="required">Clinical reason (at least 10 characters)</label>
                             <textarea id="challengeEmergencyReason" class="form-input" minlength="10" maxlength="300" rows="3" placeholder="e.g. Cardiac arrest in ICU bed 4, need medication history"></textarea>
-                            <p class="emergency-note">The emailed code is still required. The session ends after 30 minutes, is written to the ledger, and administrators are notified.</p>
+                            <p class="emergency-note">The emailed code is still required. The session ends after 30 minutes, is written to the ledger, and administrators are notified. Available to administrators and verified doctors only.</p>
                         </div>
                     </div>
                     <div class="form-message" id="challengeMessage" role="alert"></div>
                     <div class="form-group">
                         <button type="submit" id="challengeSubmitBtn" class="submit-btn"><span>Verify and sign in</span><div class="loading-spinner" aria-hidden="true"></div><i data-lucide="check" aria-hidden="true"></i></button>
                     </div>
+                </form>
+
+                <!-- After sign-in: set up the authenticator app (TOTP, RFC 6238) -->
+                <form id="totpForm" class="auth-form" aria-labelledby="totp-heading" novalidate>
+                    <div class="form-header">
+                        <div class="header-icon"><i data-lucide="smartphone" aria-hidden="true"></i></div>
+                        <h2 id="totp-heading">Set up your authenticator app</h2>
+                        <p id="totpIntro">Unusual sign-ins need a code from an authenticator app (Google Authenticator, Microsoft Authenticator, FreeOTP).</p>
+                    </div>
+                    <div class="form-group" style="text-align:center">
+                        <img id="totpQr" alt="QR code for the authenticator app" width="220" height="220" hidden>
+                        <p>Scan the QR code, or enter this key in the app:</p>
+                        <code id="totpSecret" style="font-size:1.05rem;letter-spacing:.08em;word-break:break-all"></code>
+                    </div>
+                    <div class="form-group">
+                        <label for="totpCode" class="required">Code shown in the app</label>
+                        <div class="input-wrapper">
+                            <i class="input-icon" data-lucide="key-round" aria-hidden="true"></i>
+                            <input type="text" id="totpCode" class="form-input" inputmode="numeric" maxlength="6" placeholder="6-digit code" autocomplete="one-time-code" required>
+                        </div>
+                    </div>
+                    <div class="form-message" id="totpMessage" role="alert"></div>
+                    <div class="form-group">
+                        <button type="submit" id="totpSubmitBtn" class="submit-btn"><span>Confirm and continue</span><div class="loading-spinner" aria-hidden="true"></div><i data-lucide="check" aria-hidden="true"></i></button>
+                    </div>
+                    <button type="button" id="totpSkipBtn" class="back-btn" hidden>Skip for now</button>
                 </form>
 
                 <!-- Step 2: one-time code -->

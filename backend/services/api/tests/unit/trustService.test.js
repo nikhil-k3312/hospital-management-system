@@ -66,6 +66,52 @@ describe('evaluatePolicy', () => {
   });
 });
 
+describe('session age from the sign-in time (Problem 7)', () => {
+  test('authTime, not the token iat, decides the age: 2 h -> 90, 7 h -> 75', () => {
+    const fresh = nowSec();
+    // a token refreshed a minute ago (iat) for a session that started 2 h ago (authTime)
+    expect(trustService.calculateTrustScore(makeReq(), { iat: fresh - 60, authTime: fresh - 2 * 3600 }, { isVerified: true }).score).toBe(90);
+    expect(trustService.calculateTrustScore(makeReq(), { iat: fresh - 60, authTime: fresh - 7 * 3600 }, { isVerified: true }).score).toBe(75);
+    expect(trustService.calculateTrustScore(makeReq(), { iat: fresh - 60 }, { isVerified: true }).score).toBe(100); // old tokens: iat
+  });
+
+  test('medical routes (70) still open at 7 h, closed once another penalty applies', () => {
+    const t = nowSec();
+    const at7h = trustService.calculateTrustScore(makeReq(), { authTime: t - 7 * 3600 }, { isVerified: true }).score; // 75
+    expect(trustService.evaluatePolicy(makeReq({ trust: at7h }), ['doctor'], { minTrustScore: 70 }).allowed).toBe(true);
+    const plusFailure = trustService.calculateTrustScore(makeReq(), { authTime: t - 7 * 3600 }, { isVerified: true, failedLoginAttempts: 1 }).score; // 69
+    expect(trustService.evaluatePolicy(makeReq({ trust: plusFailure }), ['doctor'], { minTrustScore: 70 }).reason).toBe('low_trust_score');
+  });
+
+  test('the request IP is kept only as a keyed hash (Problem 3)', () => {
+    const r = trustService.calculateTrustScore(makeReq(), { iat: nowSec() }, { isVerified: true });
+    expect(r.ip).toBeUndefined();
+    expect(r.ipHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+describe('break-glass after the approval check (Problem 9)', () => {
+  const reason = 'Unconscious patient in ER, allergy check';
+  test('a doctor awaiting verification cannot use break-glass', () => {
+    const req = makeReq({ role: 'doctor', breakGlass: reason, session: { approvalStatus: 'pending' } });
+    expect(trustService.evaluatePolicy(req, ['patient'], { allowBreakGlass: true })).toMatchObject({ allowed: false, reason: 'approval_pending' });
+  });
+  test('an approved doctor still can', () => {
+    const req = makeReq({ role: 'doctor', breakGlass: reason });
+    expect(trustService.evaluatePolicy(req, ['patient'], { allowBreakGlass: true })).toMatchObject({ allowed: true, breakGlass: true });
+  });
+});
+
+describe('time windows use the hospital time zone (Problem 11)', () => {
+  afterEach(() => jest.useRealTimers());
+  test('09:00 in Kolkata is 03:30 UTC: inside [8, 20] whatever the server time zone', () => {
+    jest.useFakeTimers({ now: new Date('2026-11-03T03:30:00Z') });
+    expect(trustService.evaluatePolicy(makeReq(), ['doctor'], { timeWindow: [8, 20] }).allowed).toBe(true);
+    jest.setSystemTime(new Date('2026-11-03T16:00:00Z')); // 21:30 in Kolkata
+    expect(trustService.evaluatePolicy(makeReq(), ['doctor'], { timeWindow: [8, 20] }).reason).toBe('outside_time_window');
+  });
+});
+
 describe('isWithinTimeWindow', () => {
   test.each([
     [10, [8, 20], true], [20, [8, 20], false], [7, [8, 20], false],

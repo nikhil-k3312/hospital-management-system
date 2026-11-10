@@ -30,6 +30,19 @@ async function main() {
       : `chain "${chain}": BROKEN at entry #${result.brokenAtSeq} (${result.problem})`);
   }
 
+  // Problem 10: compare each chain with the newest head anchored on the blockchain.
+  for (const chain of ['records', 'access']) {
+    const anchor = await ledgerService.verifyAnchor(chain);
+    if (!anchor.checked) console.log(`chain "${chain}": anchor not checked (${anchor.reason})`);
+    else if (!anchor.anchored) console.log(`chain "${chain}": no head anchored yet`);
+    else {
+      ok = ok && anchor.valid;
+      console.log(anchor.valid
+        ? `chain "${chain}": matches the head anchored on-chain at #${anchor.anchoredSeq} (${anchor.anchoredAt})`
+        : `chain "${chain}": DOES NOT MATCH the on-chain anchor at #${anchor.anchoredSeq} (${anchor.problem})`);
+    }
+  }
+
   for (const [entityType, model] of PROTECTED) {
     const docs = await model.find();
     const results = await Promise.all(docs.map((d) => ledgerService.verifyEntity(entityType, d)));

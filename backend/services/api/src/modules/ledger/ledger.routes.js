@@ -11,6 +11,8 @@ const { authenticate, requireRole } = require('../../middleware/auth');
 const { validate, Joi } = require('../../middleware/validate');
 const { asyncHandler } = require('../../utils/errors');
 const ledgerService = require('../../services/ledgerService');
+const anchorService = require('../../services/anchorService');
+const LedgerAnchor = require('../../models/LedgerAnchor');
 
 const router = express.Router();
 router.use(authenticate, requireRole('admin'));
@@ -76,8 +78,25 @@ router.get('/verify', asyncHandler(async (req, res) => {
     });
   }
 
-  const valid = chains.every((c) => c.valid) && entities.every((e) => e.tampered.length === 0);
-  res.json({ success: true, data: { valid, chains, entities, checkedAt: new Date(), durationMs: Date.now() - started } });
+  // 3. compare each chain with the newest head anchored on the blockchain (Problem 10)
+  const anchors = await Promise.all(['records', 'access'].map((c) => ledgerService.verifyAnchor(c)));
+
+  const valid = chains.every((c) => c.valid) && entities.every((e) => e.tampered.length === 0) && anchors.every((a) => !a.checked || a.valid);
+  res.json({ success: true, data: { valid, chains, entities, anchors, checkedAt: new Date(), durationMs: Date.now() - started } });
+}));
+
+/** GET /api/ledger/anchors?chain=access&limit=20: recent anchoring attempts (status, transaction, gas). */
+router.get('/anchors', validate({ query: Joi.object({
+  chain: Joi.string().valid('records', 'access'),
+  limit: Joi.number().integer().min(1).max(200).default(20),
+}) }), asyncHandler(async (req, res) => {
+  const filter = req.query.chain ? { chain: req.query.chain } : {};
+  res.json({ success: true, data: await LedgerAnchor.find(filter).sort({ createdAt: -1 }).limit(req.query.limit).lean() });
+}));
+
+/** POST /api/ledger/anchor: anchor both chain heads now (demo and experiments). */
+router.post('/anchor', asyncHandler(async (req, res) => {
+  res.json({ success: true, data: await anchorService.anchorAll('manual') });
 }));
 
 module.exports = router;

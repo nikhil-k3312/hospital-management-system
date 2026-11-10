@@ -22,14 +22,26 @@ class TokenService {
     return `refresh:${userId}:${this.hashJTI(jti)}`;
   }
 
+  /** End of the maximum session (Problem 7, D2): authTime + MAX_SESSION_HOURS, epoch seconds. */
+  sessionEnd(authTime) {
+    return authTime + this.config.security.maxSessionHours * 3600;
+  }
+
   /**
    * Short-lived access token. The random jti lets us revoke this exact token.
+   *   authTime  epoch seconds of the sign-in that started this session (Problem 7); it is
+   *             carried unchanged through every refresh, so the per-request trust score can
+   *             measure the real age of the session
+   *   amr       how the sign-in was proven, e.g. ['pwd', 'device'] or ['pwd', 'otp', 'totp']
    * An emergency session ({ emergencyUntil }, epoch seconds) carries emergency: true
    * and never outlives the emergency window.
    */
-  generateAccessToken(user, { emergencyUntil } = {}) {
+  generateAccessToken(user, { emergencyUntil, authTime, amr } = {}) {
     const jti = crypto.randomUUID();
-    const claims = { userId: user._id.toString(), email: user.email, role: user.role, jti };
+    const claims = {
+      userId: user._id.toString(), email: user.email, role: user.role, jti,
+      authTime: authTime || Math.floor(Date.now() / 1000), amr: amr || ['pwd'],
+    };
     if (emergencyUntil) claims.emergency = true;
     let token = jwt.sign(claims, this.config.jwt.secret, { expiresIn: this.config.jwt.expiry });
     if (emergencyUntil && jwt.decode(token).exp > emergencyUntil) {
@@ -41,13 +53,21 @@ class TokenService {
   /**
    * Long-lived refresh token, signed with a different secret. It is valid only
    * while its Redis key exists, so the server can revoke it at any time.
+   *   netHash, uaHash  keyed hash of the network prefix and hash of the user-agent at sign-in
+   *                    (Problem 8): a refresh from another network or browser is refused
+   *   authTime         sign-in time; the token never lives past authTime + MAX_SESSION_HOURS
    */
-  async generateRefreshToken(user, { emergencyUntil, emergencyReason } = {}) {
+  async generateRefreshToken(user, { emergencyUntil, emergencyReason, authTime, amr, netHash, uaHash } = {}) {
     const userId = user._id.toString();
     const jti = crypto.randomUUID();
-    // An emergency session keeps its fixed end time through every rotation.
-    const ttl = emergencyUntil ? Math.max(1, emergencyUntil - Math.floor(Date.now() / 1000)) : this.refreshTTLSeconds;
-    const payload = emergencyUntil ? { userId, jti, type: 'refresh', emergencyUntil, emergencyReason } : { userId, jti, type: 'refresh' };
+    const now = Math.floor(Date.now() / 1000);
+    const signedInAt = authTime || now;
+    // An emergency session keeps its fixed end time through every rotation; no session outlives
+    // the maximum session length.
+    const end = Math.min(emergencyUntil || Infinity, this.sessionEnd(signedInAt), now + this.refreshTTLSeconds);
+    const ttl = Math.max(1, end - now);
+    const payload = { userId, jti, type: 'refresh', authTime: signedInAt, amr: amr || ['pwd'], netHash: netHash || null, uaHash: uaHash || null };
+    if (emergencyUntil) Object.assign(payload, { emergencyUntil, emergencyReason });
     const token = jwt.sign(payload, this.config.jwt.refreshSecret, { expiresIn: ttl });
     try {
       await this.redis.setEx(this.refreshKey(userId, jti), ttl, '1');

@@ -20,3 +20,9 @@ frontend/node_modules/
 *.fdb_latexmk
 backend/services/api/scripts/.tamper-state.json
 *.lol
+
+# Besu test network keys (Problem 25)
+blockchain/besu-qbft/generated/
+# experiment outputs and downloaded datasets
+experiments/**/out/
+experiments/rba/data/

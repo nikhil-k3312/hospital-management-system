@@ -62,6 +62,9 @@ async function createUser(role, overrides = {}) {
  * Returns { token, cookie, user, agent }.
  */
 async function login(user, password = PASSWORD) {
+  // Tests obtain sessions through the first-login (bootstrap) flow, which Problem 1 restricts to
+  // accounts that never signed in. carma.test.js tests that restriction itself.
+  await User.updateOne({ _id: user._id }, { $set: { loginCount: 0 } });
   let otp;
   const spy = jest.spyOn(emailService, 'sendOTP').mockImplementation(async (email, code) => { otp = code; });
   const step1 = await request(app).post('/api/auth/login/request-otp').set('User-Agent', 'jest').send({ email: user.email, password });

@@ -45,6 +45,39 @@ describe('HealthRecordRegistry', () => {
     expect((await registry.getAnchor(k)).hospital).to.equal(hospitalB.address);
   });
 
+  describe('ledger heads (Problem 10)', () => {
+    const ACCESS = key('access');
+    const RECORDS = key('records');
+
+    it('keeps heads per hospital and chain, newest last', async () => {
+      const empty = await registry.latestLedgerHead(owner.address, ACCESS);
+      expect(empty.anchoredAt).to.equal(0n);
+
+      await expect(registry.anchorLedgerHead(ACCESS, 10, sha('head 10')))
+        .to.emit(registry, 'LedgerHeadAnchored').withArgs(owner.address, ACCESS, 10, sha('head 10'));
+      await registry.anchorLedgerHead(ACCESS, 25, sha('head 25'));
+      await registry.anchorLedgerHead(RECORDS, 3, sha('records head 3'));
+
+      const latest = await registry.latestLedgerHead(owner.address, ACCESS);
+      expect(latest.seq).to.equal(25n);
+      expect(latest.headHash).to.equal(sha('head 25'));
+      expect(await registry.ledgerHeadCount(owner.address, ACCESS)).to.equal(2n);
+      expect((await registry.ledgerHeadAt(owner.address, ACCESS, 0)).seq).to.equal(10n);
+      expect((await registry.latestLedgerHead(owner.address, RECORDS)).seq).to.equal(3n);
+    });
+
+    it('never lets the sequence number go back (no truncation or rollback)', async () => {
+      await registry.anchorLedgerHead(ACCESS, 25, sha('head 25'));
+      await expect(registry.anchorLedgerHead(ACCESS, 25, sha('other'))).to.be.revertedWith('seq must increase');
+      await expect(registry.anchorLedgerHead(ACCESS, 7, sha('older'))).to.be.revertedWith('seq must increase');
+    });
+
+    it('lets only authorised hospitals anchor heads, and rejects empty hashes', async () => {
+      await expect(registry.connect(outsider).anchorLedgerHead(ACCESS, 1, sha('x'))).to.be.revertedWith('not an authorised hospital');
+      await expect(registry.anchorLedgerHead(ACCESS, 1, ethers.ZeroHash)).to.be.revertedWith('empty hash');
+    });
+  });
+
   it('rejects empty hashes and unknown kinds', async () => {
     await expect(registry.anchor(key('a'), ethers.ZeroHash, ethers.ZeroHash, 1)).to.be.revertedWith('empty hash');
     await expect(registry.anchor(key('b'), sha('x'), ethers.ZeroHash, 9)).to.be.revertedWith('bad kind');

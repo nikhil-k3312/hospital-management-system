@@ -1,6 +1,6 @@
 const ledgerService = require('./ledgerService');
 const logger = require('../utils/logger');
-const { sha256 } = require('../utils/hash');
+const { sha256, hmac } = require('../utils/hash');
 
 /**
  * Writes one zero-trust access decision (allow or deny) to the "access" chain
@@ -24,7 +24,7 @@ async function recordAccessDecision({ req, userId, decision, reason, trustScore,
         reason,
         method: req.method,
         path: (req.originalUrl || req.path || '').split('?')[0],
-        ip: req.ip,
+        ipHash: hmac(req.ip), // keyed hash only (Problem 3): the raw address is never stored
         userAgentHash: sha256(req.get('user-agent') || ''),
         trustScore: trustScore ?? req.trustScore?.score ?? null,
         breakGlassReason: breakGlassReason || undefined,

@@ -60,15 +60,23 @@ router.post('/login/challenge',
   validate({ body: Joi.object({
     challengeId: Joi.string().hex().length(48).required(),
     otp: Joi.string().pattern(/^\d{4,8}$/).required(),
+    // high risk: code from the authenticator app (CARMA), or the security answer (baseline B2 only)
+    totp: Joi.string().pattern(/^\d{6}$/).messages({ 'string.pattern.base': 'The authenticator code has 6 digits' }),
     securityAnswer: Joi.string().trim().max(100),
-    // emergency sign-in: a clinical reason instead of the security answer (doctor/admin only)
+    // emergency sign-in: a clinical reason instead of the third factor (admins and verified doctors only)
     emergencyReason: Joi.string().trim().min(10).max(300),
-  }).oxor('securityAnswer', 'emergencyReason') }),
+  }).oxor('totp', 'securityAnswer', 'emergencyReason') }),
   asyncHandler(controller.verifyChallenge));
 router.post('/refresh-token', asyncHandler(controller.refreshToken));
 router.post('/logout', authenticate, asyncHandler(controller.logout));
 router.post('/change-password', authenticate,
   validate({ body: Joi.object({ currentPassword: Joi.string().max(128).required(), newPassword: password().required() }) }),
   asyncHandler(controller.changePassword));
+
+// Authenticator app (TOTP, Problem 2): only from a fresh, non-emergency session.
+const totpCode = Joi.string().pattern(/^\d{6}$/).messages({ 'string.pattern.base': 'The code has 6 digits' });
+router.get('/totp/status', authenticate, asyncHandler(controller.totpStatus));
+router.post('/totp/setup', authenticate, validate({ body: Joi.object({ currentCode: totpCode }) }), asyncHandler(controller.totpSetup));
+router.post('/totp/confirm', authenticate, validate({ body: Joi.object({ code: totpCode.required() }) }), asyncHandler(controller.totpConfirm));
 
 module.exports = router;

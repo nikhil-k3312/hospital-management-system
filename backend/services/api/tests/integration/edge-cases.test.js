@@ -29,6 +29,8 @@ describe('error handling', () => {
     expect(res.status).toBe(503);
     expect(res.body.code).toBe('REDIS_UNAVAILABLE');
 
+    // the bootstrap flow is open only before the first login (Problem 1)
+    await require('../../src/models/User').updateOne({ _id: user._id }, { $set: { loginCount: 0 } });
     jest.spyOn(redisClient, 'get').mockImplementationOnce(down); // OTP attempt counter
     const otp = await request(app).post('/api/auth/login/request-otp').send({ email: user.email, password: 'Str0ng!Pass' });
     expect(otp.status).toBe(503);

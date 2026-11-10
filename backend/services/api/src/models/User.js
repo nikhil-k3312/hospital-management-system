@@ -78,7 +78,16 @@ const userSchema = new mongoose.Schema({
     default: [],
   },
   loginCount: { type: Number, default: 0 },
-  // Third factor for high-risk dynamic logins. The answer is stored as a bcrypt hash
+  // Third factor for high-risk logins (Problem 2): TOTP from an authenticator app (RFC 6238).
+  // The shared secret is stored encrypted (AES-256-GCM, TOTP_ENC_KEY); totpLastStep blocks reuse.
+  totpEnabled: { type: Boolean, default: false },
+  totpSecretEnc: { type: String, default: '' },
+  totpPendingEnc: { type: String, default: '' }, // set up but not yet confirmed with a first code
+  totpLastStep: { type: Number, default: null },
+  totpEnabledAt: { type: Date, default: null },
+  // Version 3 third factor, kept only so baseline B2 (CONTEXT_PROFILE=v3) can be reproduced.
+  // CARMA uses TOTP instead (NIST SP 800-63B does not accept security questions as authenticators).
+  // The answer is stored as a bcrypt hash
   // (set the plain answer here; the pre-save hook hashes it, like the password).
   securityQuestion: { type: String, default: '' },
   securityAnswerHash: { type: String, default: '' },
@@ -136,6 +145,9 @@ userSchema.methods.toJSON = function toJSON() {
   delete obj.trustedDevices;
   delete obj.securityAnswerHash;
   delete obj.knownNetworks;
+  delete obj.totpSecretEnc;
+  delete obj.totpPendingEnc;
+  delete obj.totpLastStep;
   delete obj.__v;
   // Hide the other roles' (empty) profile sections. When a partial populate did
   // not select `role`, keep whatever profile fields were explicitly selected.

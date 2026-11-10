@@ -84,7 +84,10 @@ describe('two-step login', () => {
     const wrongCode = otp === '123456' ? '654321' : '123456';
     expect((await request(app).post('/api/auth/login/verify-otp').send({ email: user.email, otp: wrongCode })).status).toBe(401);
     expect((await request(app).post('/api/auth/login/verify-otp').send({ email: user.email, otp })).status).toBe(200);
-    expect((await request(app).post('/api/auth/login/verify-otp').send({ email: user.email, otp })).status).toBe(401);
+    // after the first login the bootstrap endpoint is closed for this account (Problem 1)
+    const again = await request(app).post('/api/auth/login/verify-otp').send({ email: user.email, otp });
+    expect(again.status).toBe(403);
+    expect(again.body.code).toBe('USE_DYNAMIC_LOGIN');
   });
 
   test('a deactivated account cannot log in', async () => {
@@ -97,16 +100,17 @@ describe('two-step login', () => {
 describe('refresh-token rotation', () => {
   test('each refresh token works exactly once', async () => {
     const session = await login(await createUser('patient'));
-    const first = await request(app).post('/api/auth/refresh-token').set('Cookie', session.cookie);
+    // same browser (User-Agent) and network as the sign-in: Problem 8 binds the refresh token to both
+    const first = await request(app).post('/api/auth/refresh-token').set('User-Agent', 'jest').set('Cookie', session.cookie);
     expect(first.status).toBe(200);
     expect(first.body.data.token).toBeTruthy();
     const newCookie = first.headers['set-cookie'].find((c) => c.startsWith('refreshToken='));
     expect(newCookie).not.toBe(session.cookie);
 
     // Replaying the old cookie fails: it was revoked when it was used.
-    expect((await request(app).post('/api/auth/refresh-token').set('Cookie', session.cookie)).status).toBe(401);
+    expect((await request(app).post('/api/auth/refresh-token').set('User-Agent', 'jest').set('Cookie', session.cookie)).status).toBe(401);
     // The new one works.
-    expect((await request(app).post('/api/auth/refresh-token').set('Cookie', newCookie)).status).toBe(200);
+    expect((await request(app).post('/api/auth/refresh-token').set('User-Agent', 'jest').set('Cookie', newCookie)).status).toBe(200);
   });
 
   test('without a cookie there is no session', async () => {

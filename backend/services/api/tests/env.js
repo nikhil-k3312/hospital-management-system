@@ -11,3 +11,10 @@ process.env.EMAIL_TRANSPORT = 'json';
 process.env.EMAIL_FROM = 'MediChain Test <test@medichain.local>';
 process.env.MIN_TRUST_SCORE = '50';
 process.env.HIGH_SENSITIVITY_TRUST_SCORE = '70';
+// CARMA settings used by the test suite
+process.env.IP_HASH_SECRET = 'test-ip-hash-secret-0123456789abcdef0123456789';
+process.env.TOTP_ENC_KEY = '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff';
+// Staff are not forced to set up an authenticator in the general tests; carma.test.js switches it on.
+process.env.TOTP_REQUIRED_ROLES = '';
+process.env.CONTEXT_PROFILE = 'carma';
+process.env.LEDGER_ANCHORING = 'false';

@@ -1,4 +1,8 @@
+const { EventEmitter } = require('events');
 const LedgerEntry = require('../models/LedgerEntry');
+
+/** Emits ('appended', chain) after every append; the anchor scheduler counts these (Problem 10). */
+const events = new EventEmitter();
 const { sha256, canonicalJSON, hashObject } = require('../utils/hash');
 
 /**
@@ -69,7 +73,9 @@ function append(params) {
   return enqueue(params.chain, async () => {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       try {
-        return await appendOnce(params);
+        const entry = await appendOnce(params);
+        events.emit('appended', params.chain);
+        return entry;
       } catch (error) {
         if (error.code !== 11000) throw error; // not a sequence collision
       }
@@ -100,9 +106,15 @@ function recordEvent({ entityType, entity, action, actor, meta, payloadHash }) {
  *      no re-ordering, nothing removed)
  * Returns the first problem found, or { valid: true }.
  */
-async function verifyChain(chain) {
-  const cursor = LedgerEntry.find({ chain }).sort({ seq: 1 }).lean().cursor();
+async function verifyChain(chain, { fromSeq = 0 } = {}) {
+  // fromSeq > 0 checks only the part of the chain after an already-verified entry (used before
+  // anchoring a new head, so a tampered chain is never "blessed" on-chain).
   let previous = null;
+  if (fromSeq > 0) {
+    previous = await LedgerEntry.findOne({ chain, seq: fromSeq - 1 }).lean();
+    if (!previous) return { chain, valid: false, entriesChecked: 0, brokenAtSeq: fromSeq - 1, problem: 'missing_entry' };
+  }
+  const cursor = LedgerEntry.find({ chain, seq: { $gte: fromSeq } }).sort({ seq: 1 }).lean().cursor();
   let checked = 0;
 
   for await (const entry of cursor) {
@@ -120,7 +132,25 @@ async function verifyChain(chain) {
     checked += 1;
   }
 
-  return { chain, valid: true, entriesChecked: checked, headHash: previous ? previous.entryHash : null };
+  return { chain, valid: true, entriesChecked: checked, headSeq: previous ? previous.seq : null, headHash: previous ? previous.entryHash : null };
+}
+
+/**
+ * Compares the chain in MongoDB with the newest head anchored on the blockchain (Problem 10).
+ * Catches what verifyChain alone cannot: a consistent rewrite (all later hashes recomputed)
+ * changes the entry at the anchored sequence number, and deleting the newest entries leaves
+ * the anchored entry missing.
+ */
+async function verifyAnchor(chain) {
+  const blockchainService = require('./blockchainService'); // lazy: optional infrastructure
+  const head = await blockchainService.latestLedgerHead(chain);
+  if (!head.checked) return { chain, checked: false, reason: head.reason };
+  if (!head.exists) return { chain, checked: true, anchored: false, valid: true };
+  const entry = await LedgerEntry.findOne({ chain, seq: head.seq }).select('seq entryHash').lean();
+  const base = { chain, checked: true, anchored: true, anchoredSeq: head.seq, anchoredAt: head.anchoredAt };
+  if (!entry) return { ...base, valid: false, problem: 'anchored_entry_missing' };
+  if (entry.entryHash !== head.headHash) return { ...base, valid: false, problem: 'anchored_entry_changed' };
+  return { ...base, valid: true };
 }
 
 /** All ledger entries for one entity, oldest first (the entity's audit trail). */
@@ -161,4 +191,4 @@ async function stats() {
   return { records, access };
 }
 
-module.exports = { append, recordEvent, verifyChain, verifyEntity, history, stats, computeEntryHash };
+module.exports = { append, recordEvent, verifyChain, verifyAnchor, verifyEntity, history, stats, computeEntryHash, events };

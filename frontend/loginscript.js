@@ -9,8 +9,10 @@
  * After the first login every sign-in goes through the dynamic login algorithm
  * (POST /api/auth/login/dynamic): the server scores location (IP vs GPS), device,
  * time and network and asks for the password only, the password + emailed code, or
- * the password + code + security question. On load the page asks POST /api/auth/route,
+ * the password + code + authenticator-app code (TOTP). On load the page asks POST /api/auth/route,
  * which can send a trusted, low-risk browser straight to the user's landing page.
+ * After a sign-in without an authenticator app, the page offers its set-up (required for staff):
+ * POST /api/auth/totp/setup, then POST /api/auth/totp/confirm.
  */
 (function loginPage() {
   const api = window.MediApi;
@@ -22,7 +24,7 @@
   };
 
   const $ = (id) => document.getElementById(id);
-  const forms = ['loginForm', 'returningForm', 'challengeForm', 'twoStepVerification', 'roleSelection', 'registerForm'];
+  const forms = ['loginForm', 'returningForm', 'challengeForm', 'totpForm', 'twoStepVerification', 'roleSelection', 'registerForm'];
   // Held only in memory between step 1 and step 2 (needed for "resend"), wiped after sign-in.
   const pending = { email: '', password: '' };
   let resendTimer = null;
@@ -93,7 +95,7 @@
   }
   const context = async () => ({ gps: await getGps() });
 
-  const RISK_TEXT = { low: 'Low risk: password only', medium: 'Medium risk: password + emailed code', high: 'High risk: password + code + security question' };
+  const RISK_TEXT = { low: 'Low risk: password only', medium: 'Medium risk: password + emailed code', high: 'High risk: password + code + authenticator app' };
   const RISK_COLOUR = { low: '#059669', medium: '#d97706', high: '#dc2626' };
 
   /** Draws the trust score and its four parts (location, device, time, network). */
@@ -143,9 +145,64 @@
     $('challengeEmergencyFields').hidden = !on;
     $('challengeEmergencyReason').value = '';
     $('challengeQuestionBlock').style.display = on || !$('challengeQuestion').textContent ? 'none' : '';
+    $('challengeTotpBlock').style.display = on || !totpRequired ? 'none' : '';
     $('challengeEmergencyToggle').querySelector('span').textContent = on
-      ? 'Answer the security question instead' : 'Emergency? Sign in with a clinical reason instead';
+      ? (totpRequired ? 'Use the authenticator app instead' : 'Answer the security question instead') : 'Emergency? Sign in with a clinical reason instead';
   }
+  let totpRequired = false;
+
+  /* ---------------------------------------------------------------- authenticator set-up */
+
+  let afterTotp = null; // what to do once the set-up is finished or skipped
+
+  /** Shows the set-up form if this account has no authenticator yet; otherwise continues at once. */
+  async function offerTotp(totp, done) {
+    if (!totp || totp.enabled) { done(); return; }
+    afterTotp = done;
+    try {
+      const { data } = await api.post('/api/auth/totp/setup', {});
+      $('totpSecret').textContent = data.secret.replace(/(.{4})/g, '$1 ').trim();
+      $('totpQr').hidden = !data.qr;
+      if (data.qr) $('totpQr').src = data.qr;
+      $('totpCode').value = '';
+      $('totpSkipBtn').hidden = totp.required;
+      $('totpIntro').textContent = totp.required
+        ? 'Your role needs an authenticator app (Google Authenticator, Microsoft Authenticator, FreeOTP) before you continue.'
+        : 'Recommended: unusual sign-ins will need a code from an authenticator app. Without one, an unusual sign-in is refused.';
+      setMessage('totpMessage', '');
+      showForm('totpForm');
+    } catch (error) {
+      notify(error.message, 'error');
+      if (!totp.required) done();
+    }
+  }
+
+  async function onTotpConfirm(event) {
+    event.preventDefault();
+    const code = $('totpCode').value.trim();
+    if (!/^\d{6}$/.test(code)) { setMessage('totpMessage', 'Enter the 6-digit code shown in the app.'); return; }
+    const button = $('totpSubmitBtn');
+    setLoading(button, true);
+    try {
+      await api.post('/api/auth/totp/confirm', { code });
+      notify('Authenticator app set up.');
+      const next = afterTotp; afterTotp = null;
+      if (next) next();
+    } catch (error) {
+      setMessage('totpMessage', error.message);
+    } finally {
+      setLoading(button, false);
+    }
+  }
+
+  /** Friendlier text for the error codes of the sign-in endpoints. */
+  const ERROR_TEXT = {
+    USE_DYNAMIC_LOGIN: 'Please sign in again from the sign-in form.',
+    TOTP_NOT_ENROLLED: 'This sign-in looks unusual and needs an authenticator app, which your account does not have yet. Sign in from your usual device or network, or contact the hospital.',
+    TOTP_REUSED: 'That authenticator code was already used. Wait for the next code.',
+    EMERGENCY_REASON_REQUIRED: 'No authenticator app is set up: give a clinical reason for emergency sign-in.',
+  };
+  const errorText = (error) => ERROR_TEXT[error.code] || error.message;
 
   /** Acts on the server's answer to a dynamic login: sign in, normal code step, or challenge. */
   function handleLoginResult(res, password) {
@@ -153,9 +210,13 @@
     if (data.mode === 'redirect') {
       pending.password = '';
       api.setToken(data.token);
-      if (data.emergency) notify(`Emergency sign-in until ${new Date(data.emergency.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}. Every action is audited.`, 'warning');
-      else notify(`Welcome back, ${data.user.fullName}. ${data.landing.reason}.`);
-      setTimeout(() => redirectAfterLogin(data.user.role, data.landing), 600);
+      if (data.emergency) {
+        notify(`Emergency sign-in until ${new Date(data.emergency.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}. Every action is audited.`, 'warning');
+        setTimeout(() => redirectAfterLogin(data.user.role, data.landing), 600);
+      } else {
+        notify(`Welcome back, ${data.user.fullName}. ${data.landing.reason}.`);
+        offerTotp(data.totp, () => setTimeout(() => redirectAfterLogin(data.user.role, data.landing), 600));
+      }
     } else if (data.mode === 'otp') {
       // First login after registration: the normal password + code flow.
       pending.email = data.email;
@@ -175,8 +236,11 @@
       $('challengeQuestion').textContent = data.securityQuestion || '';
       $('challengeAnswer').value = '';
       $('challengeAnswer').required = Boolean(data.securityQuestion);
-      setEmergency(false);
+      totpRequired = Boolean(data.totpRequired);
+      $('challengeTotp').value = '';
+      setEmergency(Boolean(data.emergencyOnly));
       $('challengeEmergencyBlock').style.display = data.emergencyAllowed ? '' : 'none';
+      $('challengeEmergencyToggle').hidden = Boolean(data.emergencyOnly); // no other third factor to switch to
       setMessage('challengeMessage', '');
       showForm('challengeForm');
       notify(res.message, 'info');
@@ -189,7 +253,7 @@
       handleLoginResult(await api.post('/api/auth/login/dynamic', { ...body, context: await context() }), body.password);
     } catch (error) {
       const remaining = error.body && error.body.attemptsRemaining;
-      setMessage(messageId, remaining !== undefined ? `${error.message}. ${remaining} attempt(s) left before the account locks.` : error.message);
+      setMessage(messageId, remaining !== undefined ? `${error.message}. ${remaining} attempt(s) left before the account locks.` : errorText(error));
     } finally {
       setLoading(button, false);
     }
@@ -212,6 +276,10 @@
       const reason = $('challengeEmergencyReason').value.trim();
       if (reason.length < 10) { setMessage('challengeMessage', 'Give a clinical reason of at least 10 characters.'); return; }
       body.emergencyReason = reason;
+    } else if (totpRequired) {
+      const totp = $('challengeTotp').value.trim();
+      if (!/^\d{6}$/.test(totp)) { setMessage('challengeMessage', 'Enter the 6-digit code from your authenticator app.'); return; }
+      body.totp = totp;
     } else if ($('challengeAnswer').required) body.securityAnswer = $('challengeAnswer').value;
     const button = $('challengeSubmitBtn');
     setLoading(button, true);
@@ -220,7 +288,7 @@
     } catch (error) {
       if (error.code === 'CHALLENGE_EXPIRED') { showForm('loginForm'); setMessage('loginMessage', error.message); return; }
       const remaining = error.body && error.body.attemptsRemaining;
-      setMessage('challengeMessage', remaining !== undefined ? `${error.message}. ${remaining} attempt(s) left.` : error.message);
+      setMessage('challengeMessage', remaining !== undefined ? `${errorText(error)}. ${remaining} attempt(s) left.` : errorText(error));
     } finally {
       setLoading(button, false);
     }
@@ -265,8 +333,10 @@
     try {
       const res = await api.post('/api/auth/login/verify-otp', { email: pending.email, otp });
       pending.password = '';
-      notify(`Welcome, ${res.data.user.fullName}. Opening your dashboard…`);
-      setTimeout(() => redirectAfterLogin(res.data.user.role, res.data.landing), 600);
+      api.setToken(res.data.token);
+      notify(`Welcome, ${res.data.user.fullName}.`);
+      // first login: set up the authenticator app before the dashboard (required for staff)
+      offerTotp(res.data.totp, () => setTimeout(() => redirectAfterLogin(res.data.user.role, res.data.landing), 600));
     } catch (error) {
       const remaining = error.body && error.body.attemptsRemaining;
       setMessage('otpMessage', remaining !== undefined ? `${error.message}. ${remaining} attempt(s) left.` : error.message);
@@ -409,6 +479,8 @@
 
     const params = new URLSearchParams(location.search);
     if (params.has('loggedOut')) setMessage('loginMessage', 'You have been signed out.', 'success');
+    else if (params.has('reauth')) setMessage('loginMessage', params.get('reauth') || 'Please sign in again.', 'info');
+    else if (params.has('totp')) setMessage('loginMessage', 'Sign in again to set up your authenticator app.', 'info');
     else if (params.has('passwordChanged')) setMessage('loginMessage', 'Password changed. Sign in with your new password.', 'success');
     else {
       // Second visit? The dynamic router decides between redirect, welcome-back form or full login.
@@ -423,6 +495,8 @@
     $('challengeForm').addEventListener('submit', onChallenge);
     $('challengeBackBtn').addEventListener('click', () => { challengeId = null; showForm('loginForm'); });
     $('challengeEmergencyToggle').addEventListener('click', () => setEmergency(!emergencyMode));
+    $('totpForm').addEventListener('submit', onTotpConfirm);
+    $('totpSkipBtn').addEventListener('click', () => { const next = afterTotp; afterTotp = null; if (next) next(); });
     $('notMeBtn').addEventListener('click', () => showForm('loginForm'));
     $('verifyCodeBtn').addEventListener('click', onVerify);
     $('resendCodeBtn').addEventListener('click', async () => {

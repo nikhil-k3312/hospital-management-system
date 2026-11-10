@@ -13,6 +13,9 @@ const ABI = [
   'function verify(bytes32 key, bytes32 dataHash) view returns (bool)',
   'function getAnchor(bytes32 key) view returns (tuple(bytes32 dataHash, bytes32 patientRef, uint64 anchoredAt, address hospital, uint8 kind))',
   'function anchorsOf(bytes32 patientRef) view returns (bytes32[])',
+  'function anchorLedgerHead(bytes32 chainId, uint64 seq, bytes32 headHash)',
+  'function latestLedgerHead(address hospital, bytes32 chainId) view returns (tuple(uint64 seq, bytes32 headHash, uint64 anchoredAt))',
+  'function ledgerHeadCount(address hospital, bytes32 chainId) view returns (uint256)',
 ];
 
 const KIND = { record: 1, file: 2, ledger: 3 };
@@ -71,6 +74,50 @@ class BlockchainService {
       if (this.signer) this.signer.reset(); // re-read the nonce from the node next time
       logger.warn(`Blockchain anchor failed for ${entityType} ${entityId} v${version}: ${error.shortMessage || error.message}`);
       return { status: 'pending', key };
+    }
+  }
+
+  static chainId(chain) {
+    return ethers.keccak256(ethers.toUtf8Bytes(chain));
+  }
+
+  /** Address this API writes with (the "hospital" whose ledger heads are looked up). */
+  async hospitalAddress() {
+    this.registry();
+    return this.signer.getAddress();
+  }
+
+  /**
+   * Anchors the head of a ledger chain (Problem 10). Returns { status: 'anchored', txHash,
+   * blockNumber, gasUsed, latencyMs } or { status: 'disabled' | 'pending', error }.
+   */
+  async anchorLedgerHead(chain, seq, headHash) {
+    if (!this.enabled) return { status: 'disabled' };
+    const started = Date.now();
+    try {
+      const tx = await this.registry().anchorLedgerHead(BlockchainService.chainId(chain), seq, BlockchainService.toBytes32(headHash));
+      const receipt = await tx.wait();
+      return { status: 'anchored', txHash: receipt.hash, blockNumber: receipt.blockNumber, gasUsed: Number(receipt.gasUsed), latencyMs: Date.now() - started };
+    } catch (error) {
+      if (this.signer) this.signer.reset();
+      const message = error.shortMessage || error.message;
+      logger.warn(`Ledger head anchor failed for ${chain} #${seq}: ${message}`);
+      return { status: 'pending', error: message };
+    }
+  }
+
+  /** The newest anchored head of a chain: { checked: true, exists, seq, headHash, anchoredAt } or { checked: false, reason }. */
+  async latestLedgerHead(chain) {
+    if (!this.enabled) return { checked: false, reason: 'chain_disabled' };
+    try {
+      const head = await this.registry().latestLedgerHead(await this.hospitalAddress(), BlockchainService.chainId(chain));
+      if (head.anchoredAt === 0n) return { checked: true, exists: false };
+      return {
+        checked: true, exists: true, seq: Number(head.seq), headHash: head.headHash.slice(2),
+        anchoredAt: new Date(Number(head.anchoredAt) * 1000).toISOString(),
+      };
+    } catch (error) {
+      return { checked: false, reason: 'chain_unreachable' };
     }
   }
 

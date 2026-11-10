@@ -19,6 +19,7 @@ async function start() {
     await emailService.verifyConnection();
 
     const app = require('./app');
+    require('./services/anchorService').start(); // Problem 10: anchor ledger heads on the blockchain
     const server = app.listen(config.port, () => {
       logger.info(`MediChain API listening on http://localhost:${config.port} (${config.nodeEnv})`);
     });

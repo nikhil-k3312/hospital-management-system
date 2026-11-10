@@ -135,3 +135,29 @@ All endpoints are under `/api`. Responses are `{ success, data | message }`.
 * Serve over HTTPS (the refresh cookie is `Secure` in production).
 * `ALLOWED_ORIGINS` set to the real frontend origin(s) only.
 * MongoDB and Redis on private networks with authentication enabled.
+
+## CARMA paper version (branch `paper/carma`)
+
+This branch is the code described in the Objective 1 journal paper (CARMA: Context-Aware,
+Risk-adaptive Multi-layer Authentication). Changes compared with Version 3, by problem number
+of the improvement plan:
+
+| # | Change | Where |
+|---|---|---|
+| 1 | The first-login endpoints (`/login/request-otp`, `/login/verify-otp`) refuse accounts that already signed in (`USE_DYNAMIC_LOGIN`) | `auth.controller.js` |
+| 2 | Authenticator app (TOTP, RFC 6238) replaces the security question at high risk; set-up only in a fresh, non-emergency session; no high-risk sign-in without it (patients, agents) or only the emergency path (verified doctors, admins) | `totpService.js`, `auth.controller.js`, `login.html` |
+| 3 | IP addresses and network prefixes stored only as HMAC-SHA256 (`IP_HASH_SECRET`) | `utils/hash.js`, `auditService.js`, `contextService.js` |
+| 4-5 | Possession gate (password-only needs a trusted device) and failure gate (fewer than 2 failures) | `contextService.tierFor` |
+| 6 | Role thresholds (`RISK_<ROLE>_UPPER/LOWER`) and `CONTEXT_PROFILE` = carma / v3 (baseline B2) / static (baseline B1) | `config.js`, `contextService.js` |
+| 7 | Session age from the sign-in time (`authTime`), maximum session `MAX_SESSION_HOURS` | `tokenService.js`, `trustService.js` |
+| 8 | Refresh tokens bound to network and browser (`REAUTH_REQUIRED`) | `auth.controller.js`, `js/api.js` |
+| 9 | Break-glass and emergency sign-in only for approved doctors and admins | `trustService.js`, `auth.controller.js` |
+| 10 | Ledger heads of the access and records chains anchored on-chain; verification and tamper demo (`--rewrite`, `--truncate`) | `anchorService.js`, `HealthRecordRegistry.sol`, `scripts/` |
+| 11 | Time windows evaluated in the hospital time zone | `trustService.js` |
+| 12 | `AUDIT_EVERY_REQUEST` switch (experiment only) | `middleware/auth.js` |
+| 25 | 4-validator Hyperledger Besu QBFT network | `blockchain/besu-qbft/` |
+| 26 | On-chain k-of-n register of staff roles; admins approve with their own wallet | `RoleRegistry.sol`, `roleService.js`, admin page "Role Registry" |
+
+New settings are documented in `.env.example`. Tests: `npm test` in `backend/services/api`
+(new: `tests/integration/carma.test.js`, `tests/unit/totpService.test.js`) and `npx hardhat test`
+in `blockchain`. Experiments: see `experiments/README.md`.

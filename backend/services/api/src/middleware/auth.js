@@ -1,6 +1,8 @@
 const tokenService = require('../services/tokenService');
 const trustService = require('../services/trustService');
 const auditService = require('../services/auditService');
+const roleService = require('../services/roleService');
+const config = require('../config/config');
 const redisClient = require('../db/redis');
 const User = require('../models/User');
 const logger = require('../utils/logger');
@@ -23,13 +25,15 @@ async function loadSessionState(userId) {
   const cached = await redisClient.get(sessionKey(userId));
   if (cached) return JSON.parse(cached);
 
-  const user = await User.findById(userId).select('isActive isVerified failedLoginAttempts approvalStatus').lean();
+  const user = await User.findById(userId).select('isActive isVerified failedLoginAttempts approvalStatus role totpEnabled').lean();
   if (!user) return null;
   const state = {
     isActive: user.isActive,
     isVerified: user.isVerified,
     failedLoginAttempts: user.failedLoginAttempts || 0,
     approvalStatus: user.approvalStatus,
+    role: user.role,
+    totpEnabled: Boolean(user.totpEnabled),
   };
   await redisClient.setEx(sessionKey(userId), SESSION_CACHE_SECONDS, JSON.stringify(state));
   return state;
@@ -44,11 +48,15 @@ async function invalidateSession(userId) {
   }
 }
 
+/** Routes a staff member without an authenticator app may still use: the auth endpoints themselves. */
+const ENROLMENT_PATHS = /^\/api\/auth\//;
+
 /**
  * authenticate: runs before every protected route.
- *   1. read the Bearer token          4. compute the trust score
- *   2. verify signature/expiry/revoked 5. deny below MIN_TRUST_SCORE
- *   3. load (cached) account state     6. audit the decision
+ *   1. read the Bearer token           5. deny below MIN_TRUST_SCORE
+ *   2. verify signature/expiry/revoked 6. staff: authenticator app set up (Problem 2, D1)
+ *   3. load (cached) account state     7. staff: role held in the on-chain registry (Problem 26)
+ *   4. compute the trust score         8. audit the decision
  */
 async function authenticate(req, res, next) {
   const header = req.headers.authorization || '';
@@ -88,7 +96,31 @@ async function authenticate(req, res, next) {
     });
   }
 
-  await auditService.recordAccessDecision({ req, userId: decoded.userId, decision: 'allow', reason: 'authenticated', trustScore: req.trustScore.score });
+  // D1: staff must set up the authenticator app before using the system (not enforced during an
+  // emergency session, and the auth endpoints that perform the set-up stay reachable).
+  if (config.security.totpRequiredRoles.includes(decoded.role) && !sessionState.totpEnabled && !decoded.emergency
+    && !ENROLMENT_PATHS.test(req.originalUrl || req.path || '')) {
+    return deny(req, res, 403, 'totp_enrolment_required', 'Set up your authenticator app to continue.', { userId: decoded.userId });
+  }
+
+  // Problem 26: a staff role is valid only if the k-of-n on-chain registry holds it.
+  if (roleService.enabled && roleService.STAFF_ROLES.includes(decoded.role)) {
+    let held;
+    try {
+      held = await roleService.hasRole(decoded.userId, decoded.role);
+    } catch (error) {
+      return deny(req, res, 503, 'role_registry_unavailable', 'The role registry cannot be reached. Please try again shortly.', { userId: decoded.userId });
+    }
+    if (!held) {
+      logger.warn(`Role ${decoded.role} of ${decoded.email} is not in the on-chain registry`);
+      return deny(req, res, 403, 'role_not_registered', 'Your role has not been approved in the hospital role registry.', { userId: decoded.userId });
+    }
+  }
+
+  // Problem 12: AUDIT_EVERY_REQUEST=false skips this write (performance experiment only; denials are always written).
+  if (config.audit.everyRequest) {
+    await auditService.recordAccessDecision({ req, userId: decoded.userId, decision: 'allow', reason: 'authenticated', trustScore: req.trustScore.score });
+  }
   return next();
 }
 
