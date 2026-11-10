@@ -1,7 +1,7 @@
 const net = require('net');
 const geoip = require('geoip-lite');
 const config = require('../config/config');
-const { hmac } = require('../utils/hash');
+const { hmac, ipHash } = require('../utils/hash');
 
 /**
  * Dynamic login: a context-aware trust score computed on the server.
@@ -35,8 +35,14 @@ const { hmac } = require('../utils/hash');
  * (HMAC-SHA256 with IP_HASH_SECRET) of the IP and of the network prefix are stored;
  * GPS coordinates are used and discarded.
  */
-const WEIGHTS = { location: 35, device: 25, time: 20, network: 20 };
-const BEHAVIOUR_PENALTY = { perFailure: 10, max: 30 };
+// Points per level come from config.context.points (CONTEXT_POINTS); the defaults are the values above.
+const P = () => config.context.points;
+const maxOf = (k) => Math.max(...Object.values(P()[k]));
+const WEIGHTS = {
+  get location() { return maxOf('location'); }, get device() { return maxOf('device'); },
+  get time() { return maxOf('time'); }, get network() { return maxOf('network'); },
+};
+const BEHAVIOUR_PENALTY = { get perFailure() { return P().penalty.perFailure; }, get max() { return P().penalty.max; } };
 const MAX_KNOWN_NETWORKS = 10;
 
 function haversineKm(lat1, lon1, lat2, lon2) {
@@ -100,25 +106,27 @@ const service = {
   },
 
   locationScore(ipGeo, gps) {
-    if (!ipGeo || !validGps(gps)) return { score: 15, category: 'Location unknown', distanceKm: null };
+    const L = P().location;
+    if (!ipGeo || !validGps(gps)) return { score: L.unknown, category: 'Location unknown', distanceKm: null };
     const distanceKm = haversineKm(ipGeo.lat, ipGeo.lon, gps.lat, gps.lon);
-    if (distanceKm < 50) return { score: 35, category: 'IP and GPS agree', distanceKm };
-    if (distanceKm < 350) return { score: 20, category: 'IP and GPS in the same region', distanceKm };
-    return { score: 5, category: 'IP far from GPS (possible VPN)', distanceKm };
+    if (distanceKm < 50) return { score: L.near, category: 'IP and GPS agree', distanceKm };
+    if (distanceKm < 350) return { score: L.mid, category: 'IP and GPS in the same region', distanceKm };
+    return { score: L.far, category: 'IP far from GPS (possible VPN)', distanceKm };
   },
 
   networkScore(ip, user) {
-    if (isHospitalNetwork(ip)) return { score: 20, category: 'Hospital network' };
+    const N = P().network;
+    if (isHospitalNetwork(ip)) return { score: N.hospital, category: 'Hospital network' };
     const prefixHash = hmac(networkPrefix(ip));
-    if ((user.knownNetworks || []).some((n) => n.prefixHash === prefixHash)) return { score: 15, category: 'Known network' };
-    return { score: 5, category: 'New network' };
+    if ((user.knownNetworks || []).some((n) => n.prefixHash === prefixHash)) return { score: N.known, category: 'Known network' };
+    return { score: N.new, category: 'New network' };
   },
 
   timeScore(now = new Date()) {
     const hour = localHour(now);
     const { dutyStartHour, dutyEndHour } = config.context;
     const onDuty = hour >= dutyStartHour && hour < dutyEndHour;
-    return { score: onDuty ? 20 : 10, category: onDuty ? 'Duty hours' : 'Off hours', hour };
+    return { score: onDuty ? P().time.duty : P().time.off, category: onDuty ? 'Duty hours' : 'Off hours', hour };
   },
 
   behaviourPenalty(user) {
@@ -170,7 +178,7 @@ const service = {
     const ip = normaliseIp(req.ip);
     const ipGeo = service.lookupGeo(ip);
     const location = service.locationScore(ipGeo, gps);
-    const device = { score: deviceKnown ? 25 : 10, category: deviceKnown ? 'Trusted browser' : 'New browser' };
+    const device = { score: deviceKnown ? P().device.trusted : P().device.new, category: deviceKnown ? 'Trusted browser' : 'New browser' };
     const time = service.timeScore(now);
     const network = service.networkScore(ip, user);
     const behaviour = service.behaviourPenalty(user);
@@ -200,7 +208,7 @@ const service = {
         network: { ...network, max: WEIGHTS.network },
         behaviour: { ...behaviour, max: 0, min: -BEHAVIOUR_PENALTY.max },
       },
-      ipHash: hmac(ip),
+      ipHash: ipHash(ip),
       networkPrefixHash: hmac(networkPrefix(ip)),
     };
   },

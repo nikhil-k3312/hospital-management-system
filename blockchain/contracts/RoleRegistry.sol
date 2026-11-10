@@ -37,11 +37,16 @@ contract RoleRegistry {
         uint8 approvals;
         bool executed;
         bool cancelled;
+        uint32 epoch;         // governor set the approvals belong to
     }
 
     mapping(address => bool) public isGovernor;
     uint8 public governorCount;
     uint8 public threshold;
+    /// Increases whenever the governor set or the threshold changes. Approvals collected under an
+    /// older set no longer count, so removing a compromised administrator also voids the approvals
+    /// he already gave on pending proposals.
+    uint32 public governorEpoch;
 
     address public immutable bootstrapper;
     bool public bootstrapOpen = true;
@@ -138,6 +143,7 @@ contract RoleRegistry {
         p.newThreshold = newThreshold;
         p.proposer = msg.sender;
         p.createdAt = uint64(block.timestamp);
+        p.epoch = governorEpoch;
         id = proposals.length - 1;
         emit Proposed(id, action, subject, role, account, newThreshold, msg.sender);
         _approve(id);
@@ -162,6 +168,7 @@ contract RoleRegistry {
         Proposal storage p = proposals[id];
         require(!p.executed && !p.cancelled, "already closed");
         require(block.timestamp <= p.createdAt + PROPOSAL_TTL, "proposal expired");
+        require(p.epoch == governorEpoch, "governors changed: propose again");
         require(!hasApproved[id][msg.sender], "already approved");
         hasApproved[id][msg.sender] = true;
         p.approvals += 1;
@@ -184,16 +191,19 @@ contract RoleRegistry {
             require(governorCount < 50, "too many governors");
             isGovernor[p.account] = true;
             governorCount += 1;
+            governorEpoch += 1;
             emit GovernorAdded(p.account);
         } else if (p.action == Action.RemoveGovernor) {
             require(isGovernor[p.account], "not a governor");
             require(governorCount - 1 >= threshold, "would fall below threshold");
             isGovernor[p.account] = false;
             governorCount -= 1;
+            governorEpoch += 1;
             emit GovernorRemoved(p.account);
         } else {
             require(p.newThreshold >= 1 && p.newThreshold <= governorCount, "bad threshold");
             threshold = p.newThreshold;
+            governorEpoch += 1;
             emit ThresholdChanged(p.newThreshold);
         }
         emit Executed(id);

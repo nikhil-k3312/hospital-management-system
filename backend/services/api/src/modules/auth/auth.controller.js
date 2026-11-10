@@ -11,7 +11,7 @@ const totpService = require('../../services/totpService');
 const roleService = require('../../services/roleService');
 const redisClient = require('../../db/redis');
 const crypto = require('crypto');
-const { sha256, hmac } = require('../../utils/hash');
+const { sha256, ipHash } = require('../../utils/hash');
 const { invalidateSession } = require('../../middleware/auth');
 const { BREAK_GLASS_ROLES } = require('../../services/trustService');
 const config = require('../../config/config');
@@ -105,7 +105,7 @@ async function refuseRefresh(req, res, decoded, reason) {
   res.clearCookie(REFRESH_COOKIE, { ...cookieOptions(), maxAge: undefined });
   await ledgerService.append({
     chain: 'access', entityType: 'session_refresh', entityId: decoded.userId, action: 'DENY', actorId: decoded.userId,
-    meta: { reason, ipHash: hmac(contextService.normaliseIp(req.ip)), userAgentHash: uaHashOf(req) },
+    meta: { reason, ipHash: ipHash(req.ip), userAgentHash: uaHashOf(req) },
   }).catch((error) => logger.error(`Refresh audit failed: ${error.message}`));
 }
 
@@ -120,7 +120,7 @@ async function emergencyEligible(user) {
   const eligible = user.role === 'admin' || (user.role === 'doctor' && user.approvalStatus === 'approved');
   if (!eligible || !BREAK_GLASS_ROLES.includes(user.role)) return false;
   try {
-    return await roleService.hasRole(user._id, user.role);
+    return await roleService.hasRole(user._id, user.role, user.roleSalt);
   } catch (error) {
     return false; // registry unreachable and no cached answer: fail closed
   }
@@ -239,11 +239,11 @@ async function requestOtp(req, res) {
 async function verifyOtp(req, res) {
   const { email, otp } = req.body;
   const user = await User.findOne({ email });
-  if (!user) throw unauthorized('Invalid or expired code', 'INVALID_OTP');
+  // Problem 1: bootstrap flow for the first login only. This endpoint has no password, so an
+  // account that already signed in gets exactly the "wrong code" answer (nothing is revealed).
+  if (!user || user.loginCount > 0) throw unauthorized('Invalid or expired code', 'INVALID_OTP');
   if (user.isAccountLocked()) throw forbidden('Account is locked after too many failed attempts. Try again later.', 'ACCOUNT_LOCKED');
   if (!user.isActive) throw forbidden('Account is deactivated. Contact the hospital administrator.', 'ACCOUNT_DEACTIVATED');
-  // Problem 1: bootstrap flow for the first login only (see requestOtp).
-  if (user.loginCount > 0) throw forbidden('Please sign in through the normal sign-in page.', 'USE_DYNAMIC_LOGIN');
 
   const attempts = await otpService.getAttempts(email);
   if (attempts >= config.otp.maxAttempts) throw tooMany('Too many OTP attempts. Try again in 15 minutes.');
@@ -271,9 +271,10 @@ async function verifyOtp(req, res) {
   await user.save({ validateBeforeSave: false });
   await invalidateSession(user._id);
 
-  const access = await issueSession(req, res, user, { amr: ['pwd', 'otp'] });
-  // The full password + code login makes this browser a trusted device for next time.
-  await deviceService.trust(req, res, user);
+  const access = await issueSession(req, res, user, { amr: ['pwd', 'otp', 'bootstrap'] });
+  // The first full login makes this browser a trusted device, and the one allowed to set up the
+  // authenticator app later (Problem 2).
+  await deviceService.trust(req, res, user, 'bootstrap');
   const landing = firstLogin ? routingService.homeFor(user) : await routingService.resolveLanding(user);
   logger.info(`Login: ${email} (${user.role})${firstLogin ? ' [first login]' : ''}`);
 
@@ -332,7 +333,10 @@ const publicAssessment = (a) => ({ score: a.score, risk: a.risk, tier: a.tier, f
  * An emergency sign-in gets a short session and does not make this browser or network trusted,
  * because the third factor that would have proved them was skipped.
  */
-async function completeDynamicLogin(req, res, user, assessment, deviceKnown, emergency = null, amr = ['pwd']) {
+async function completeDynamicLogin(req, res, user, assessment, deviceKnown, emergency = null, amr = ['pwd'], deviceVia = null) {
+  // 'enrol': this session runs on the browser of the first login or one proven with the
+  // authenticator app, the only places where an authenticator may be set up (Problem 2).
+  const methods = deviceKnown ? [...amr, 'device', ...(['bootstrap', 'totp'].includes(deviceVia) ? ['enrol'] : [])] : amr;
   user.failedLoginAttempts = 0;
   user.accountLockedUntil = null;
   user.lastLogin = new Date();
@@ -340,8 +344,9 @@ async function completeDynamicLogin(req, res, user, assessment, deviceKnown, eme
   if (!emergency) contextService.rememberNetwork(user, assessment);
   await user.save({ validateBeforeSave: false });
   await invalidateSession(user._id);
-  const access = await issueSession(req, res, user, { emergency, amr: deviceKnown ? [...amr, 'device'] : amr });
-  if (!deviceKnown && !emergency) await deviceService.trust(req, res, user); // the extra factors just proved this browser
+  const access = await issueSession(req, res, user, { emergency, amr: methods });
+  // the extra factors just proved this browser; remember how
+  if (!deviceKnown && !emergency) await deviceService.trust(req, res, user, amr.includes('totp') ? 'totp' : 'otp');
   const landing = await routingService.resolveLanding(user);
   if (emergency) {
     await auditContext(req, user, assessment, 'allow', 'emergency_login', emergency.reason);
@@ -378,7 +383,9 @@ async function route(req, res) {
   if (presented && assessment.risk === 'low') {
     try {
       const decoded = await tokenService.verifyRefreshToken(presented);
-      const problem = decoded.userId === user._id.toString() ? bindingProblem(req, decoded) : 'other_user';
+      let problem = decoded.userId === user._id.toString() ? bindingProblem(req, decoded) : 'other_user';
+      // the assessment above is already low risk: a changed network may continue (review issue 6)
+      if (problem === 'network_changed' && !decoded.emergencyUntil && config.context.refreshOnNetworkChange === 'rescore') problem = null;
       if (problem && problem !== 'other_user') await refuseRefresh(req, res, decoded, problem); // Problem 8
       if (!problem) {
         await tokenService.revokeRefreshToken(decoded.userId, decoded.jti);
@@ -443,11 +450,12 @@ async function dynamicLogin(req, res) {
   }
 
   const deviceKnown = Boolean(known && known.user._id.equals(user._id));
+  const deviceVia = deviceKnown ? known.device.via : null;
   user = await User.findById(user._id); // fresh copy (recordFailedAttempt may have run earlier)
   const assessment = contextService.assess({ req, user, deviceKnown, gps: req.body.context?.gps });
 
   if (assessment.risk === 'low') {
-    return res.json({ success: true, message: 'Welcome back', data: await completeDynamicLogin(req, res, user, assessment, deviceKnown) });
+    return res.json({ success: true, message: 'Welcome back', data: await completeDynamicLogin(req, res, user, assessment, deviceKnown, null, ['pwd'], deviceVia) });
   }
 
   const needsTotp = assessment.factors.includes('totp');
@@ -466,7 +474,7 @@ async function dynamicLogin(req, res) {
   await sendCode();
   const challengeId = crypto.randomBytes(24).toString('hex');
   await redisClient.setEx(challengeKey(challengeId), CHALLENGE_TTL_SECONDS, JSON.stringify({
-    userId: user._id.toString(), factors: assessment.factors, deviceKnown, assessment, emergencyOnly,
+    userId: user._id.toString(), factors: assessment.factors, deviceKnown, deviceVia, assessment, emergencyOnly,
   }));
   await auditContext(req, user, assessment, 'challenge', emergencyOnly ? 'high_risk_emergency_only' : `${assessment.risk}_risk_step_up`);
 
@@ -550,7 +558,7 @@ async function verifyChallenge(req, res) {
   res.json({
     success: true,
     message: emergency ? 'Emergency sign-in: this session is audited and ends automatically' : 'Login successful',
-    data: await completeDynamicLogin(req, res, user, challenge.assessment, challenge.deviceKnown, emergency, amr),
+    data: await completeDynamicLogin(req, res, user, challenge.assessment, challenge.deviceKnown, emergency, amr, challenge.deviceVia),
   });
 }
 
@@ -578,8 +586,24 @@ async function refreshToken(req, res) {
     throw unauthorized('Account deactivated', 'ACCOUNT_DEACTIVATED');
   }
 
-  // Problem 8: another network or browser, or a session past its maximum length, must sign in again.
-  const problem = bindingProblem(req, decoded);
+  // Problem 8: another browser, or a session past its maximum length, must sign in again.
+  // Another network (review issue 6, REFRESH_ON_NETWORK_CHANGE=rescore): the new context is scored
+  // like a sign-in (trusted-device cookie, optional GPS from the page); at low risk the session
+  // continues, bound to the new network. Emergency sessions never continue on another network.
+  let problem = bindingProblem(req, decoded);
+  if (problem === 'network_changed' && !decoded.emergencyUntil && config.context.refreshOnNetworkChange === 'rescore') {
+    const known = await deviceService.recognise(req);
+    const deviceKnown = Boolean(known && known.user._id.equals(user._id));
+    const assessment = contextService.assess({ req, user, deviceKnown, gps: req.body?.context?.gps });
+    await ledgerService.append({
+      chain: 'access', entityType: 'session_refresh', entityId: user._id, action: assessment.risk === 'low' ? 'ALLOW' : 'DENY',
+      actorId: user._id, actorRole: user.role,
+      meta: { reason: assessment.risk === 'low' ? 'network_changed_rescored' : 'network_changed', trustScore: assessment.score, risk: assessment.risk,
+        gate: assessment.gate || undefined, network: assessment.breakdown.network.category, device: assessment.breakdown.device.category,
+        location: assessment.breakdown.location.category, ipHash: assessment.ipHash },
+    }).catch((error) => logger.error(`Refresh audit failed: ${error.message}`));
+    if (assessment.risk === 'low') problem = null;
+  }
   if (problem) {
     await refuseRefresh(req, res, decoded, problem);
     const text = {
@@ -655,15 +679,26 @@ async function changePassword(req, res) {
 /* ------------------------------------------------------------------ authenticator app (TOTP) */
 
 /**
- * Enrolment is allowed only inside a trusted session (Problem 2): not an emergency session,
- * and only shortly after a sign-in (TOTP_SETUP_FRESH_MINUTES). Replacing an existing
- * authenticator also needs a current code from it.
+ * Enrolment is allowed only inside a trusted session (Problem 2; review issue 2):
+ *   - not an emergency session, and only shortly after a sign-in (TOTP_SETUP_FRESH_MINUTES)
+ *   - only during the first login, or on the browser that did the first login, or on a browser
+ *     proven with the authenticator app ('bootstrap' / 'enrol' in the session's methods).
+ *     A session proven with password + emailed code alone is NOT enough: an attacker with the
+ *     password and the mailbox could otherwise register his own authenticator.
+ *   - or within 24 h after an administrator allowed it following an in-person identity check
+ * Replacing an existing authenticator also needs a current code from it. Every set-up is
+ * reported to the owner by email.
  */
-function assertEnrolmentAllowed(req) {
+function assertEnrolmentAllowed(req, user) {
   if (req.user.emergency) throw forbidden('An authenticator app cannot be set up during an emergency session.', 'TOTP_SETUP_NOT_ALLOWED');
   const age = nowSeconds() - (req.user.authTime || req.user.iat);
   if (age > config.security.totpSetupFreshMinutes * 60) {
     throw forbidden(`For your safety, sign in again (within ${config.security.totpSetupFreshMinutes} minutes) to set up the authenticator app.`, 'TOTP_SETUP_NOT_FRESH');
+  }
+  const amr = req.user.amr || [];
+  const adminAllowed = user.totpEnrolAllowedUntil && user.totpEnrolAllowedUntil > new Date();
+  if (!amr.includes('bootstrap') && !amr.includes('enrol') && !adminAllowed) {
+    throw forbidden('The authenticator app can be set up only on the device you first signed in with. If you no longer have it, ask the hospital administrator.', 'TOTP_SETUP_NOT_TRUSTED');
   }
 }
 
@@ -675,8 +710,8 @@ async function totpStatus(req, res) {
 
 /** POST /api/auth/totp/setup { currentCode? }: creates a new secret (not active until confirmed). */
 async function totpSetup(req, res) {
-  assertEnrolmentAllowed(req);
   const user = await User.findById(req.user.userId);
+  assertEnrolmentAllowed(req, user);
   if (user.totpEnabled) {
     const check = await totpService.verifyForUser(user, req.body.currentCode);
     if (!check.ok) throw forbidden('Enter a current code from your existing authenticator app to replace it.', 'TOTP_CODE_REQUIRED');
@@ -690,8 +725,8 @@ async function totpSetup(req, res) {
 
 /** POST /api/auth/totp/confirm { code }: the first code proves the app holds the secret. */
 async function totpConfirm(req, res) {
-  assertEnrolmentAllowed(req);
   const user = await User.findById(req.user.userId);
+  assertEnrolmentAllowed(req, user);
   if (!user.totpPendingEnc) throw badRequestCode('Start the set-up first.', 'TOTP_NO_PENDING_SETUP');
   const result = totpService.check(totpService.decryptSecret(user.totpPendingEnc), req.body.code);
   if (!result.ok) throw badRequestCode('That code is not correct. Check the time on your phone and try the next code.', 'INVALID_TOTP');
@@ -701,8 +736,11 @@ async function totpConfirm(req, res) {
   user.totpEnabled = true;
   user.totpLastStep = result.step;
   user.totpEnabledAt = new Date();
+  user.totpEnrolAllowedUntil = null; // an administrator's allowance is used up
   await user.save({ validateBeforeSave: false });
   await invalidateSession(user._id);
+  emailService.sendSecurityNotice(user.email, user.fullName,
+    `An authenticator app was ${replaced ? 'replaced' : 'set up'} for your MediChain account on ${user.totpEnabledAt.toISOString()}.`);
   await ledgerService.append({
     chain: 'records', entityType: 'user', entityId: user._id, action: replaced ? 'TOTP_REPLACED' : 'TOTP_ENROLLED',
     actorId: user._id, actorRole: user.role, payload: { totpEnabled: true, at: user.totpEnabledAt },

@@ -136,59 +136,25 @@ async function verifyChain(chain, { fromSeq = 0 } = {}) {
 }
 
 /**
- * Compares the chain in MongoDB with the newest head anchored on the blockchain (Problem 10).
+ * Compares the chain in MongoDB with EVERY head anchored on the blockchain (Problem 10).
  * Catches what verifyChain alone cannot: a consistent rewrite (all later hashes recomputed)
- * changes the entry at the anchored sequence number, and deleting the newest entries leaves
- * the anchored entry missing.
+ * changes the entry at an anchored sequence number, and deleting the newest entries leaves an
+ * anchored entry missing. Nothing is read from the LedgerAnchor collection.
  */
 async function verifyAnchor(chain) {
   const blockchainService = require('./blockchainService'); // lazy: optional infrastructure
-  const head = await blockchainService.latestLedgerHead(chain);
-  if (!head.checked) return { chain, checked: false, reason: head.reason };
-  if (!head.exists) return { chain, checked: true, anchored: false, valid: true };
-  const entry = await LedgerEntry.findOne({ chain, seq: head.seq }).select('seq entryHash').lean();
-  const base = { chain, checked: true, anchored: true, anchoredSeq: head.seq, anchoredAt: head.anchoredAt };
-  if (!entry) return { ...base, valid: false, problem: 'anchored_entry_missing' };
-  if (entry.entryHash !== head.headHash) return { ...base, valid: false, problem: 'anchored_entry_changed' };
-  return { ...base, valid: true };
-}
-
-/** All ledger entries for one entity, oldest first (the entity's audit trail). */
-function history(entityType, entityId) {
-  return LedgerEntry.find({ chain: 'records', entityType, entityId: String(entityId) }).sort({ seq: 1 }).lean();
-}
-
-/**
- * Checks whether an entity still matches what the ledger last recorded for it.
- * A direct database edit changes the entity's payload hash but cannot change
- * the ledger (doing so would break the chain), so the two no longer agree.
- */
-async function verifyEntity(entityType, entity) {
-  const latest = await LedgerEntry.findOne({
-    chain: 'records', entityType, entityId: String(entity._id), payloadHash: { $ne: null },
-    action: { $nin: ['FILE_ATTACHED', 'VIEW', 'BREAK_GLASS_ACCESS'] },
-  }).sort({ seq: -1 }).lean();
-
-  if (!latest) {
-    return { entityId: String(entity._id), matches: false, reason: 'no_ledger_entry' };
+  const onchain = await blockchainService.ledgerHeads(chain);
+  if (!onchain.checked) return { chain, checked: false, reason: onchain.reason };
+  if (!onchain.heads.length) return { chain, checked: true, anchored: false, valid: true };
+  const latest = onchain.heads[onchain.heads.length - 1];
+  const base = { chain, checked: true, anchored: true, anchors: onchain.heads.length, anchoredSeq: latest.seq, anchoredAt: latest.anchoredAt };
+  const entries = await LedgerEntry.find({ chain, seq: { $in: onchain.heads.map((h) => h.seq) } }).select('seq entryHash').lean();
+  const bySeq = new Map(entries.map((e) => [e.seq, e.entryHash]));
+  for (const h of onchain.heads) {
+    if (!bySeq.has(h.seq)) return { ...base, valid: false, problem: 'anchored_entry_missing', brokenAtSeq: h.seq };
+    if (bySeq.get(h.seq) !== h.headHash) return { ...base, valid: false, problem: 'anchored_entry_changed', brokenAtSeq: h.seq };
   }
-  const currentHash = hashObject(entity.ledgerPayload());
-  return {
-    entityId: String(entity._id),
-    matches: currentHash === latest.payloadHash,
-    currentHash,
-    ledgerHash: latest.payloadHash,
-    ledgerSeq: latest.seq,
-  };
-}
-
-async function stats() {
-  const [records, access] = await Promise.all(['records', 'access'].map(async (chain) => {
-    const count = await LedgerEntry.countDocuments({ chain });
-    const head = await LedgerEntry.findOne({ chain }).sort({ seq: -1 }).lean();
-    return { chain, entries: count, headHash: head ? head.entryHash : null, lastEntryAt: head ? head.timestamp : null };
-  }));
-  return { records, access };
+  return { ...base, valid: true };
 }
 
 module.exports = { append, recordEvent, verifyChain, verifyAnchor, verifyEntity, history, stats, computeEntryHash, events };

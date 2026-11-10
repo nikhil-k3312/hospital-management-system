@@ -7,6 +7,7 @@
  *   node attacks.js --reps 50
  * Output: out/attacks.csv (one row per scenario x role x profile) and out/attacks_raw.csv.
  *
+ * Rate limiting is OFF in all scenarios except S10 (which measures it); the paper must say so.
  * The attacker always knows the victim's password. Whether they also control the victim's
  * mailbox, device, cookie or a seen authenticator code is part of each scenario. A scenario
  * "succeeds" when the attacker obtains a session (an access token). Victims have an
@@ -19,8 +20,10 @@ const h = require('./harness');
 
 const ROLES = ['patient', 'insurance_agent', 'doctor', 'admin'];
 const PROFILES = ['static', 'v3', 'carma'];
-const VICTIM_UA = 'VictimBrowser/1.0';
-const ATTACKER_UA = 'AttackerBrowser/1.0';
+// Realistic user-agents: CARMA compares browser family + OS (review issue 7).
+const VICTIM_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
+const ATTACKER_UA = 'Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0';
+const VICTIM_UA_UPDATED = VICTIM_UA.replace('Chrome/130', 'Chrome/131'); // same browser after an update
 const REASON = 'Cardiac arrest in ICU bed 4, need medication history now';
 const { NETWORKS } = h;
 
@@ -54,7 +57,7 @@ const SCENARIOS = [
     for (let i = 0; i < 2; i += 1) await h.http('POST', '/api/auth/login/dynamic', { ip: NETWORKS.known, ua: VICTIM_UA, cookies: device, body: { email: user.email, password: `Guess!${i}x`, context: { gps: null } } });
     return attempt({ user, ip: NETWORKS.known, ua: VICTIM_UA, cookies: device, gps: h.gpsFor(NETWORKS.known, 'near') });
   } },
-  { id: 'S10', name: 'Credential stuffing: 1 guess per account from a foreign IP, no mailbox', run: ({ user }) => attempt({ user, ip: NETWORKS.foreign, ua: 'python-requests/2.31' }) },
+  { id: 'S7b', name: 'Device cookie copied into the SAME browser family/OS (e.g. malware on the victim PC), new network', run: ({ user, device }) => attempt({ user, ip: NETWORKS.new, ua: VICTIM_UA_UPDATED, cookies: device, gps: h.gpsFor(NETWORKS.new, 'near') }) },
   { id: 'S11', name: 'Emailed-code guessing until lock-out (medium-tier challenge)', run: async ({ user }) => {
     const res = await h.http('POST', '/api/auth/login/dynamic', { ip: NETWORKS.new, ua: ATTACKER_UA, body: { email: user.email, password: h.PASSWORD, context: { gps: h.gpsFor(NETWORKS.new, 'near') } } });
     const d = res.body?.data;
@@ -100,6 +103,33 @@ const SCENARIOS = [
   } },
 ];
 
+/**
+ * S10, credential stuffing WITH the production rate limits on (review issue 9): one foreign IP tries
+ * a leaked password list against 60 accounts, one attempt each. The other scenarios run without
+ * rate limiting so that repeated trials do not block each other; this one measures the limiter.
+ */
+async function stuffing(profile, ipIndex) {
+  const ip = `81.2.69.${150 + ipIndex}`; // a fresh source address per profile (limiter counts per IP)
+  const accounts = [];
+  for (let i = 0; i < 60; i += 1) accounts.push(await h.createUser('patient', { loginCount: 3 }));
+  h.api.config.isTest = false; // switches the express-rate-limit limiters back on
+  let sessions = 0; let limited = null; let tried = 0;
+  try {
+    for (const user of accounts) {
+      tried += 1;
+      const res = await h.http('POST', '/api/auth/login/dynamic', { ip, ua: 'python-requests/2.31', body: { email: user.email, password: h.PASSWORD, context: { gps: null } } });
+      if (res.status === 429) { limited = tried; break; }
+      if (res.body?.data?.mode === 'redirect') sessions += 1;
+    }
+  } finally {
+    h.api.config.isTest = true;
+  }
+  return { scenario: 'S10', description: 'Credential stuffing, 60 accounts, 1 attempt each, one foreign IP, rate limits ON, no mailbox', profile, role: 'patient',
+    tier: '', success_rate: (sessions / accounts.length).toFixed(2),
+    outcome: `${sessions} sessions; ${limited ? `HTTP 429 from attempt ${limited} on (AUTH_RATE_LIMIT_MAX=${h.api.config.rateLimit.authMax})` : `no rate limit hit in ${tried} attempts`}`,
+    v3_code_before_fixes: '' };
+}
+
 async function main() {
   const a = h.args();
   const reps = Number(a.reps || 10);
@@ -140,6 +170,11 @@ async function main() {
     }
     console.log(`${sc.id} done`);
   }
+  for (const [i, profile] of PROFILES.entries()) {
+    h.api.config.context.profile = profile;
+    summary.push(await stuffing(profile, i));
+  }
+  console.log('S10 done');
   h.writeCsv(`${h.OUT}/attacks.csv`, summary);
   h.writeCsv(`${h.OUT}/attacks_raw.csv`, raw);
   console.log(`\nWritten to ${h.OUT}/attacks.csv. Send me that file.`);

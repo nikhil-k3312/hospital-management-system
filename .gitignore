@@ -26,3 +26,4 @@ blockchain/besu-qbft/generated/
 # experiment outputs and downloaded datasets
 experiments/**/out/
 experiments/rba/data/
+blockchain/besu-qbft/machines/

@@ -172,8 +172,13 @@
       setMessage('totpMessage', '');
       showForm('totpForm');
     } catch (error) {
-      notify(error.message, 'error');
-      if (!totp.required) done();
+      if (totp.required) { // staff cannot continue without it
+        showForm('loginForm');
+        setMessage('loginMessage', errorText(error));
+      } else {
+        notify(errorText(error), 'info');
+        done();
+      }
     }
   }
 
@@ -201,6 +206,7 @@
     TOTP_NOT_ENROLLED: 'This sign-in looks unusual and needs an authenticator app, which your account does not have yet. Sign in from your usual device or network, or contact the hospital.',
     TOTP_REUSED: 'That authenticator code was already used. Wait for the next code.',
     EMERGENCY_REASON_REQUIRED: 'No authenticator app is set up: give a clinical reason for emergency sign-in.',
+    TOTP_SETUP_NOT_TRUSTED: 'For your safety, the authenticator app can be set up only on the device you first signed in with. If you no longer have it, ask the hospital administrator to reset it.',
   };
   const errorText = (error) => ERROR_TEXT[error.code] || error.message;
 

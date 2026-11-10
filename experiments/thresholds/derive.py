@@ -39,9 +39,16 @@ LEVELS = {
 KEY = {'location': 'L', 'device': 'D', 'time': 'T', 'network': 'N'}
 
 
+POINTS = None  # set by --points: exact points per level (same file as the API's CONTEXT_POINTS)
+
+
 def score(ctx, w):
-    s = sum(w[KEY[sig]] * LEVELS[sig][ctx[sig]] for sig in LEVELS)
-    s -= min(30, 10 * ctx['failures'])
+    if POINTS:
+        s = sum(POINTS[sig][ctx[sig]] for sig in LEVELS)
+        s -= min(POINTS['penalty']['max'], POINTS['penalty']['perFailure'] * ctx['failures'])
+    else:
+        s = sum(w[KEY[sig]] * LEVELS[sig][ctx[sig]] for sig in LEVELS)
+        s -= min(30, 10 * ctx['failures'])
     return int(round(max(0, min(100, s))))
 
 
@@ -58,10 +65,10 @@ def applies(rule, role):
     return rule['roles'] == 'all' or role in rule['roles'].split(';')
 
 
-def derive(rules, w, role):
+def derive(rules, w, role, min_lower=0):
     mine = [r for r in rules if applies(r, role)]
     upper, upper_by = 0, '(none: no at_least_code rule)'
-    lower, lower_by = 0, '(none: no third_factor rule)'
+    lower, lower_by = min_lower, f'(floor --min-lower {min_lower})' if min_lower else '(none: no third_factor rule)'
     for r in mine:
         scores = [score(c, w) for c in expand(r)]
         if r['requirement'] == 'at_least_code' and max(scores) >= upper:
@@ -108,16 +115,21 @@ def friction_curve(rules, w, role, lower):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--rules', default=os.path.join(HERE, 'rules.csv'))
-    ap.add_argument('--weights', default=None)
+    ap.add_argument('--weights', default=None, help='{"L":35,"D":25,"T":20,"N":20}, level ratios as in the paper')
+    ap.add_argument('--points', default=None, help='../rba/out/context_points.json: exact points per level (overrides --weights)')
+    ap.add_argument('--min-lower', type=int, default=0, help='optional floor for every lower threshold (e.g. 50), if your guide wants one')
     args = ap.parse_args()
     w = {'L': 35, 'D': 25, 'T': 20, 'N': 20}
     if args.weights:
         w.update(json.load(open(args.weights)))
+    global POINTS
+    if args.points:
+        POINTS = json.load(open(args.points))
     with open(args.rules, newline='', encoding='utf-8') as fh:
         rules = list(csv.DictReader(fh))
     os.makedirs(OUT, exist_ok=True)
 
-    results = [derive(rules, w, role) for role in ROLES]
+    results = [derive(rules, w, role, args.min_lower) for role in ROLES]
     with open(os.path.join(OUT, 'derived_thresholds.csv'), 'w', newline='') as fh:
         wr = csv.DictWriter(fh, fieldnames=results[0].keys()); wr.writeheader(); wr.writerows(results)
     with open(os.path.join(OUT, 'derived.env'), 'w') as fh:

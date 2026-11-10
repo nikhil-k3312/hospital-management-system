@@ -37,10 +37,30 @@
     return body;
   }
 
+  /**
+   * The browser position, only if the user already allowed it (never shows a prompt). Sent with a
+   * refresh so a session whose network changed can continue when the new context is low risk.
+   */
+  async function quietGps() {
+    try {
+      if (!navigator.permissions || !navigator.geolocation) return null;
+      const state = await navigator.permissions.query({ name: 'geolocation' });
+      if (state.state !== 'granted') return null;
+      return await new Promise((resolve) => navigator.geolocation.getCurrentPosition(
+        (p) => resolve({ lat: p.coords.latitude, lon: p.coords.longitude, accuracy: p.coords.accuracy }), () => resolve(null), { timeout: 3000, maximumAge: 300000 },
+      ));
+    } catch (e) {
+      return null;
+    }
+  }
+
   /** Exchanges the HttpOnly refresh cookie for a new access token (rotating the cookie). */
   function refreshSession() {
     if (!refreshing) {
-      refreshing = fetch('/api/auth/refresh-token', { method: 'POST', credentials: 'same-origin' })
+      refreshing = quietGps()
+        .then((gps) => fetch('/api/auth/refresh-token', {
+          method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ context: { gps } }),
+        }))
         .then(parse)
         .then((body) => {
           accessToken = body.data.token;
@@ -98,7 +118,7 @@
       return request(method, path, { body, query, form, retry: false });
     }
     // D1: staff without an authenticator app are sent to set it up
-    if (response.status === 403 && typeof location !== 'undefined' && !path.startsWith('/api/auth/')) {
+    if (response.status === 403 && typeof location !== 'undefined' && typeof response.clone === 'function' && !path.startsWith('/api/auth/')) {
       const copy = response.clone();
       const peek = await copy.json().catch(() => null);
       if (peek && peek.code === 'TOTP_ENROLMENT_REQUIRED') location.replace('/login.html?totp=1');

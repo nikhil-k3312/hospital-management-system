@@ -84,10 +84,11 @@ describe('two-step login', () => {
     const wrongCode = otp === '123456' ? '654321' : '123456';
     expect((await request(app).post('/api/auth/login/verify-otp').send({ email: user.email, otp: wrongCode })).status).toBe(401);
     expect((await request(app).post('/api/auth/login/verify-otp').send({ email: user.email, otp })).status).toBe(200);
-    // after the first login the bootstrap endpoint is closed for this account (Problem 1)
+    // after the first login the bootstrap endpoint is closed for this account (Problem 1); it gives
+    // the same answer as a wrong code, so it reveals nothing to someone without the password
     const again = await request(app).post('/api/auth/login/verify-otp').send({ email: user.email, otp });
-    expect(again.status).toBe(403);
-    expect(again.body.code).toBe('USE_DYNAMIC_LOGIN');
+    expect(again.status).toBe(401);
+    expect(again.body.code).toBe('INVALID_OTP');
   });
 
   test('a deactivated account cannot log in', async () => {

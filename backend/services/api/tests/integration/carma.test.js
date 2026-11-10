@@ -12,11 +12,14 @@ const ledgerService = require('../../src/services/ledgerService');
 const LedgerEntry = require('../../src/models/LedgerEntry');
 const LedgerAnchor = require('../../src/models/LedgerAnchor');
 const User = require('../../src/models/User');
+const contextService = require('../../src/services/contextService');
 
 const HYDERABAD_IP = '49.207.0.1';
 const OTHER_HYDERABAD_NET = '49.207.9.1';
 const UK_IP = '81.2.69.142';
 const GPS_HYDERABAD = { lat: 17.39, lon: 78.49 };
+/** A browser position that agrees with where GeoIP places an address (no assumption about the city). */
+const gpsAt = (ip) => { const g = contextService.lookupGeo(ip); return g ? { lat: g.lat, lon: g.lon } : null; };
 const UA = 'jest';
 
 const defaults = {
@@ -76,9 +79,11 @@ describe('Problem 1: the bootstrap endpoints serve the first login only', () => 
     expect(req1.body.code).toBe('USE_DYNAMIC_LOGIN');
     expect(codes).toHaveLength(0); // no code was sent
 
+    // verify-otp has no password check, so it answers exactly like a wrong code (nothing revealed)
     const req2 = await post('/api/auth/login/verify-otp').send({ email: user.email, otp: '123456' });
-    expect(req2.status).toBe(403);
-    expect(req2.body.code).toBe('USE_DYNAMIC_LOGIN');
+    const unknown = await post('/api/auth/login/verify-otp').send({ email: 'nobody@example.com', otp: '123456' });
+    expect(req2.status).toBe(401);
+    expect(req2.body).toMatchObject({ code: 'INVALID_OTP', message: unknown.body.message });
     expect(cookiesOf(req2).some((c) => c.startsWith('refreshToken=') || c.startsWith('mcDevice='))).toBe(false);
   });
 
@@ -116,6 +121,38 @@ describe('Problem 2: authenticator app (TOTP)', () => {
     expect(ch.body.data.totpRequired).toBe(true);
     const replay = await post('/api/auth/login/challenge', { ip: UK_IP }).send({ challengeId: ch.body.data.challengeId, otp: codes[0], totp: code });
     expect(replay.body.code).toBe('TOTP_REUSED');
+  });
+
+  test('review issue 2: a session proven only with password + emailed code on a NEW browser cannot set up an app', async () => {
+    const user = await createUser('patient');
+    await firstLogin(user); // bootstrap browser: 'jest' from Hyderabad
+    // attacker: other browser, VPN exit in the same city with a matching GPS -> 70, medium (possession gate)
+    const codes = captureCodes();
+    const ch = await post('/api/auth/login/dynamic', { ip: OTHER_HYDERABAD_NET, ua: 'attacker-browser' }).send({ email: user.email, password: PASSWORD, context: { gps: gpsAt(OTHER_HYDERABAD_NET) } });
+    expect(ch.body.data.assessment.risk).toBe('medium');
+    const done = await post('/api/auth/login/challenge', { ip: OTHER_HYDERABAD_NET, ua: 'attacker-browser' }).send({ challengeId: ch.body.data.challengeId, otp: codes[0] });
+    expect(done.status).toBe(200);
+    const setup = await post('/api/auth/totp/setup', { ip: OTHER_HYDERABAD_NET, ua: 'attacker-browser', token: done.body.data.token }).send({});
+    expect(setup.status).toBe(403);
+    expect(setup.body.code).toBe('TOTP_SETUP_NOT_TRUSTED');
+
+    // the same attacker browser is now trusted ('otp'), but still may not set up an app at the next sign-in
+    const again = await post('/api/auth/login/dynamic', { ip: OTHER_HYDERABAD_NET, ua: 'attacker-browser', cookies: cookiesOf(done) })
+      .send({ password: PASSWORD, context: { gps: gpsAt(OTHER_HYDERABAD_NET) } });
+    expect(again.body.data.mode).toBe('redirect');
+    expect((await post('/api/auth/totp/setup', { ip: OTHER_HYDERABAD_NET, ua: 'attacker-browser', token: again.body.data.token }).send({})).body.code).toBe('TOTP_SETUP_NOT_TRUSTED');
+  });
+
+  test('the browser of the first login may set up the app later, and the owner is told by email', async () => {
+    const user = await createUser('patient');
+    const { cookies } = await firstLogin(user);
+    const login2 = await post('/api/auth/login/dynamic', { cookies }).send({ password: PASSWORD, context: { gps: GPS_HYDERABAD } });
+    expect(login2.body.data.mode).toBe('redirect');
+    const notice = jest.spyOn(emailService, 'sendSecurityNotice').mockImplementation(async () => null);
+    const setup = await post('/api/auth/totp/setup', { token: login2.body.data.token }).send({});
+    expect(setup.status).toBe(200);
+    expect((await post('/api/auth/totp/confirm', { token: login2.body.data.token }).send({ code: totpService.codeAt(setup.body.data.secret) })).status).toBe(200);
+    expect(notice).toHaveBeenCalledWith(user.email, expect.any(String), expect.stringContaining('authenticator app was set up'));
   });
 
   test('replacing an authenticator needs a current code from it', async () => {
@@ -177,7 +214,9 @@ describe('Problem 2: authenticator app (TOTP)', () => {
     await enrolTotp(patient._id);
     const res = await as(admin).post(`/api/admin/users/${patient._id}/reset-totp`);
     expect(res.status).toBe(200);
-    expect((await User.findById(patient._id)).totpEnabled).toBe(false);
+    const after = await User.findById(patient._id);
+    expect(after.totpEnabled).toBe(false);
+    expect(after.totpEnrolAllowedUntil.getTime()).toBeGreaterThan(Date.now() + 23 * 3600 * 1000); // one set-up allowed for 24 h
     expect(await LedgerEntry.countDocuments({ action: 'TOTP_RESET' })).toBe(1);
   });
 });
@@ -270,6 +309,28 @@ describe('Problems 7-8: sign-in time and context-bound refresh', () => {
     expect(moved.body).toMatchObject({ code: 'REAUTH_REQUIRED', reason: 'network_changed' });
   });
 
+  test('review issue 6: a changed network continues silently when the new context is low risk', async () => {
+    const user = await createUser('patient');
+    const { cookies } = await firstLogin(user);
+    // new network, trusted browser, GPS agrees with the new IP: 35 + 25 + 20 + 5 = 85 -> low
+    const gps = gpsAt(OTHER_HYDERABAD_NET);
+    expect(gps).not.toBeNull(); // the test needs GeoIP to know this address
+    const ok = await post('/api/auth/refresh-token', { cookies, ip: OTHER_HYDERABAD_NET }).send({ context: { gps } });
+    expect(ok.status).toBe(200);
+    const entry = await LedgerEntry.findOne({ chain: 'access', entityType: 'session_refresh', 'meta.reason': 'network_changed_rescored' }).lean();
+    expect(entry).toMatchObject({ action: 'ALLOW', meta: { risk: 'low' } });
+    // the new token is bound to the new network: refreshing from there works without another check
+    expect((await post('/api/auth/refresh-token', { cookies: cookiesOf(ok), ip: OTHER_HYDERABAD_NET }).send()).status).toBe(200);
+  });
+
+  test('REFRESH_ON_NETWORK_CHANGE=reauth always asks for a new sign-in', async () => {
+    config.context.refreshOnNetworkChange = 'reauth';
+    const user = await createUser('patient');
+    const { cookies } = await firstLogin(user);
+    const res = await post('/api/auth/refresh-token', { cookies, ip: OTHER_HYDERABAD_NET }).send({ context: { gps: GPS_HYDERABAD } });
+    expect(res.body).toMatchObject({ code: 'REAUTH_REQUIRED', reason: 'network_changed' });
+  });
+
   test('a session cannot be refreshed past MAX_SESSION_HOURS', async () => {
     const user = await createUser('patient');
     const { cookies } = await firstLogin(user);
@@ -295,6 +356,7 @@ describe('Problem 10: ledger heads anchored on the blockchain', () => {
       const last = heads[chain][heads[chain].length - 1];
       return last ? { checked: true, exists: true, seq: last.seq, headHash: last.headHash, anchoredAt: new Date().toISOString() } : { checked: true, exists: false };
     });
+    jest.spyOn(blockchainService, 'ledgerHeads').mockImplementation(async (chain) => ({ checked: true, heads: heads[chain].map((h) => ({ ...h, anchoredAt: new Date().toISOString() })) }));
     return heads;
   }
   afterEach(() => { delete blockchainService.enabled; });
@@ -333,6 +395,28 @@ describe('Problem 10: ledger heads anchored on the blockchain', () => {
     expect((await anchorService.anchorHead('access')).status).toBe('up_to_date'); // nothing new to seal
     await someAccessEntries(1);
     expect((await anchorService.anchorHead('access')).status).toBe('refused'); // a tampered chain is never sealed
+    const Notification = require('../../src/models/Notification');
+    await new Promise((r) => setTimeout(r, 50)); // the alert is written without blocking anchoring
+    expect(await Notification.countDocuments({ title: 'Ledger tampering detected' })).toBeGreaterThan(0);
+
+    // review issue 1: deleting the server's own anchor records does not help the insider, because
+    // the starting point is read from the contract
+    await LedgerAnchor.deleteMany({});
+    await someAccessEntries(1);
+    expect((await anchorService.anchorHead('access')).status).toBe('refused');
+    expect(await ledgerService.verifyAnchor('access')).toMatchObject({ valid: false, brokenAtSeq: 5 });
+  });
+
+  test('every anchored head is checked, not only the newest', async () => {
+    const heads = fakeChain();
+    await someAccessEntries(3);
+    await anchorService.anchorHead('access'); // head #2
+    await someAccessEntries(3);
+    await anchorService.anchorHead('access'); // head #5
+    expect(heads.access.map((h) => h.seq)).toEqual([2, 5]);
+    // pretend the newest head itself was forged to match a rewritten chain: the older head still exposes it
+    heads.access[0].headHash = 'f'.repeat(64);
+    expect(await ledgerService.verifyAnchor('access')).toMatchObject({ valid: false, problem: 'anchored_entry_changed', brokenAtSeq: 2 });
   });
 
   test('deleting the newest entries is detected once an anchor covered them', async () => {

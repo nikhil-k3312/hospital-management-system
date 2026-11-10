@@ -67,7 +67,8 @@ router.post('/login/challenge',
     emergencyReason: Joi.string().trim().min(10).max(300),
   }).oxor('totp', 'securityAnswer', 'emergencyReason') }),
   asyncHandler(controller.verifyChallenge));
-router.post('/refresh-token', asyncHandler(controller.refreshToken));
+// optional browser position, used only if the network changed since the sign-in (review issue 6)
+router.post('/refresh-token', validate({ body: Joi.object({ context }) }), asyncHandler(controller.refreshToken));
 router.post('/logout', authenticate, asyncHandler(controller.logout));
 router.post('/change-password', authenticate,
   validate({ body: Joi.object({ currentPassword: Joi.string().max(128).required(), newPassword: password().required() }) }),

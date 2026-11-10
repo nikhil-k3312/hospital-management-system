@@ -43,6 +43,19 @@ describe('contextService', () => {
     expect(contextService.tierFor(0, trusted('patient', { profile: 'static' })).risk).toBe('medium');
   });
 
+  test('points come from CONTEXT_POINTS (review issue 5)', () => {
+    const config = require('../../src/config/config');
+    const saved = config.context.points;
+    try {
+      config.context.points = { ...saved, location: { near: 31, mid: 18, unknown: 13, far: 4 } };
+      expect(contextService.locationScore(null, null).score).toBe(13);
+      expect(contextService.WEIGHTS.location).toBe(31);
+    } finally {
+      config.context.points = saved;
+    }
+    expect(contextService.locationScore(null, null).score).toBe(15);
+  });
+
   test('network hashes are keyed (Problem 3): HMAC, not a plain SHA-256 of the prefix', () => {
     const { sha256 } = require('../../src/utils/hash');
     const h = contextService.networkHash('49.207.0.1');

@@ -85,11 +85,12 @@ async function main() {
     // login-time cost of the on-chain role check: cache miss vs cache hit
     const roleService = h.api.require('./src/services/roleService');
     const u = await h.createUser('doctor');
+    const salt = await roleService.constructor.ensureSalt(u);
     const miss = []; const hit = [];
     for (let i = 0; i < 50; i += 1) {
       await roleService.invalidate(u._id);
-      let t = process.hrtime.bigint(); await roleService.hasRole(u._id, 'doctor'); miss.push(Number(process.hrtime.bigint() - t) / 1e6);
-      t = process.hrtime.bigint(); await roleService.hasRole(u._id, 'doctor'); hit.push(Number(process.hrtime.bigint() - t) / 1e6);
+      let t = process.hrtime.bigint(); await roleService.hasRole(u._id, 'doctor', salt); miss.push(Number(process.hrtime.bigint() - t) / 1e6);
+      t = process.hrtime.bigint(); await roleService.hasRole(u._id, 'doctor', salt); hit.push(Number(process.hrtime.bigint() - t) / 1e6);
     }
     lines.push(`role check: cache miss ms ${JSON.stringify(stats(miss.map((x) => Number(x.toFixed(2)))))}, cache hit ms ${JSON.stringify(stats(hit.map((x) => Number(x.toFixed(3)))))}`);
   } else {

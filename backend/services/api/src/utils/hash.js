@@ -21,6 +21,13 @@ function ipHashKey() {
 
 const hmac = (value) => crypto.createHmac('sha256', ipHashKey()).update(String(value ?? '')).digest('hex');
 
+/** Keyed hash of an IP address, after "::ffff:1.2.3.4" -> "1.2.3.4", so every part of the system
+ *  produces the same value for the same client (review issue 12). */
+const ipHash = (ip) => {
+  const s = String(ip || '');
+  return hmac(s.startsWith('::ffff:') && /^\d+\.\d+\.\d+\.\d+$/.test(s.slice(7)) ? s.slice(7) : s);
+};
+
 /**
  * Deterministic JSON: object keys are sorted at every level, so the same data
  * always produces the same string (and therefore the same hash) no matter in
@@ -40,4 +47,4 @@ function canonicalJSON(value) {
 
 const hashObject = (value) => sha256(canonicalJSON(value));
 
-module.exports = { sha256, hmac, canonicalJSON, hashObject };
+module.exports = { sha256, hmac, ipHash, canonicalJSON, hashObject };

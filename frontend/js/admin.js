@@ -77,7 +77,11 @@
       approve: (el) => c.act(async () => {
         const res = await c.api.patch(`/api/admin/doctors/${el.dataset.id}/verify`, { decision: 'approve' });
         // Problem 26: with the on-chain registry the role still needs k administrators' approval
-        if (res.registry) await Wallet.send(res.registry.proposeTx, 'Role proposed on-chain. Another administrator must approve it on the Role Registry page.');
+        if (res.registry) {
+          const reg = (await c.api.get('/api/admin/roles/registry')).data;
+          const summary = checkPropose(res.registry.proposeTx, res.registry.verify, reg, el.dataset.id);
+          await signChecked(reg, res.registry.proposeTx, summary, 'Role proposed on-chain. Another administrator must approve it on the Role Registry page.');
+        }
         return res;
       }, { success: 'Credentials approved.' }),
       reject: (el) => UI.modal({
@@ -102,11 +106,18 @@
       const [account] = await window.ethereum.request({ method: 'eth_requestAccounts' });
       return account;
     },
+    /** Refuses to sign on any other network than the registry's (e.g. a public chain with real fees). */
+    async checkNetwork(expectedChainId) {
+      const current = parseInt(await window.ethereum.request({ method: 'eth_chainId' }), 16);
+      if (expectedChainId && current !== expectedChainId) {
+        throw new Error(`Your wallet is on network ${current}, but the role registry is on network ${expectedChainId}. Switch the network in the wallet and try again.`);
+      }
+    },
     async waitForReceipt(hash) {
       for (let i = 0; i < 60; i += 1) {
         const receipt = await window.ethereum.request({ method: 'eth_getTransactionReceipt', params: [hash] });
         if (receipt) {
-          if (receipt.status !== '0x1') throw new Error('The transaction was rejected by the contract (for example: already approved, expired, or not a governor).');
+          if (receipt.status !== '0x1') throw new Error('The transaction was rejected by the contract (for example: already approved, expired, governors changed, or not a governor).');
           return receipt;
         }
         await new Promise((r) => setTimeout(r, 1000));
@@ -123,6 +134,52 @@
     },
   };
 
+  /**
+   * Review issue 4: the wallet only shows hex, so the page decodes the transaction the server built
+   * and checks it against what the administrator clicked, BEFORE asking the wallet to sign.
+   * The subject is recomputed here from the user id and salt with keccak256 (js/keccak.js).
+   * Remaining limit (stated in the paper): this page itself is served by the hospital server.
+   */
+  const REG_ACTIONS = ['grant', 'revoke', 'add_governor', 'remove_governor', 'set_threshold'];
+  const REG_ROLES = { 1: 'doctor', 2: 'insurance_agent', 3: 'admin' };
+  const selector = (signature) => window.Keccak.keccak256Text(signature).slice(0, 10);
+  const words = (data, sel) => {
+    if (!data.toLowerCase().startsWith(selector(sel))) throw new Error('The transaction does not call the expected contract function. Not signed.');
+    const body = data.slice(10);
+    return Array.from({ length: body.length / 64 }, (_, i) => body.slice(i * 64, i * 64 + 64));
+  };
+
+  function checkPropose(tx, verify, reg, clickedUserId) {
+    if (tx.to.toLowerCase() !== reg.address.toLowerCase()) throw new Error('The transaction is not addressed to the role registry. Not signed.');
+    const w = words(tx.data, 'propose(uint8,bytes32,uint8,address,uint8)');
+    const action = REG_ACTIONS[parseInt(w[0], 16)];
+    const subject = `0x${w[1]}`;
+    const role = REG_ROLES[parseInt(w[2], 16)] || null;
+    if (action !== verify.action) throw new Error(`The transaction would ${action}, not ${verify.action}. Not signed.`);
+    if (clickedUserId) {
+      if (verify.userId !== clickedUserId) throw new Error('The transaction is for a different account than the one you clicked. Not signed.');
+      const expected = window.Keccak.keccak256Text(`medichain-user:${clickedUserId}:${verify.salt}`);
+      if (subject !== expected) throw new Error('The account in the transaction does not match the account you clicked. Not signed.');
+      if (role !== verify.role) throw new Error(`The transaction names the role ${role}, not ${verify.role}. Not signed.`);
+    }
+    return `${titleCase(action)} the role "${titleCase(role || '')}" for ${verify.fullName || 'this account'}`;
+  }
+
+  function checkApprove(tx, reg, proposal) {
+    if (tx.to.toLowerCase() !== reg.address.toLowerCase()) throw new Error('The transaction is not addressed to the role registry. Not signed.');
+    const w = words(tx.data, 'approve(uint256)');
+    if (parseInt(w[0], 16) !== proposal.id) throw new Error(`The transaction approves proposal #${parseInt(w[0], 16)}, not #${proposal.id}. Not signed.`);
+    return `Approve proposal #${proposal.id}: ${titleCase(proposal.action)} ${titleCase(proposal.role || '')}${proposal.user ? ` for ${proposal.user.fullName}` : ''}`;
+  }
+
+  /** Shows the decoded change, checks the network, and only then lets the wallet sign. */
+  async function signChecked(reg, tx, summary, successText) {
+    await Wallet.checkNetwork(reg.chainId);
+    const ok = await UI.confirmDialog('Check before signing', `${summary}. Your browser decoded the transaction and it matches. Your wallet will now ask you to sign it with your own key.`, { confirmLabel: 'Sign with my wallet' });
+    if (!ok) throw new Error('Not signed.');
+    return Wallet.send(tx, successText);
+  }
+
   async function roles(c) {
     const reg = (await c.api.get('/api/admin/roles/registry')).data;
     if (c.stale()) return;
@@ -134,6 +191,7 @@
     const proposals = (await c.api.get('/api/admin/roles/proposals')).data;
     if (c.stale()) return;
     const state = (p) => (p.executed ? tag('active', 'Executed') : p.cancelled ? tag('inactive', 'Cancelled')
+      : p.epoch !== reg.governorEpoch ? tag('inactive', 'Void: governors changed')
       : new Date(p.expiresAt) < new Date() ? tag('denied', 'Expired') : tag('pending', `${p.approvals}/${reg.threshold} approvals`));
     const what = (p) => (p.user ? `${esc(titleCase(p.action))} ${esc(titleCase(p.role || ''))}: <strong>${esc(p.user.fullName)}</strong>`
       : p.account ? `${esc(titleCase(p.action))} <span class="mono">${esc(p.account)}</span>` : `${esc(titleCase(p.action))} ${p.newThreshold || ''}`);
@@ -141,6 +199,7 @@
     c.container.innerHTML = `
       ${UI.card('Role registry', 'key-round', `<dl class="kv">
         <dt>Contract</dt><dd class="mono">${esc(reg.address)}</dd>
+        <dt>Network</dt><dd>chain id ${esc(String(reg.chainId))} (your wallet must be on the same network)</dd>
         <dt>Rule</dt><dd>${reg.threshold} of ${reg.governorCount} administrators must approve every staff role change</dd>
         <dt>Bootstrap</dt><dd>${reg.bootstrapOpen ? tag('pending', 'Open: run the bootstrap script, then close it') : tag('active', 'Closed')}</dd></dl>`)}
       ${UI.card('Staff accounts', 'users', UI.table([
@@ -156,19 +215,21 @@
         { label: 'Change', render: what },
         { label: 'Proposed by', render: (p) => `<span class="mono text-small">${esc(shortHash(p.proposer, 12))}</span><br><span class="text-muted text-small">${esc(relTime(p.createdAt))}</span>` },
         { label: 'State', render: state },
-        { label: '', render: (p) => (!p.executed && !p.cancelled && new Date(p.expiresAt) > new Date()
+        { label: '', render: (p) => (!p.executed && !p.cancelled && p.epoch === reg.governorEpoch && new Date(p.expiresAt) > new Date()
           ? `<button class="btn btn-sm btn-primary" data-action="approve-proposal" data-id="${p.id}" data-user="${p.user ? p.user._id : ''}">Approve with my wallet</button>` : '') },
       ], proposals, 'No proposals yet'))}`;
 
     c.on({
       propose: (el) => c.act(async () => {
         const { data } = await c.api.post('/api/admin/roles/proposals', { action: el.dataset.kind, userId: el.dataset.id });
-        await Wallet.send(data.tx, 'Proposal created (your signature counts as the first approval).');
+        const summary = checkPropose(data.tx, data.verify, reg, el.dataset.id);
+        await signChecked(reg, data.tx, summary, 'Proposal created (your signature counts as the first approval).');
         await c.api.post('/api/admin/roles/refresh', { userId: el.dataset.id });
       }, { success: false }),
       'approve-proposal': (el) => c.act(async () => {
+        const proposal = proposals.find((p) => String(p.id) === el.dataset.id);
         const { data } = await c.api.post(`/api/admin/roles/proposals/${el.dataset.id}/approve`);
-        await Wallet.send(data.tx, 'Approval recorded on-chain.');
+        await signChecked(reg, data.tx, checkApprove(data.tx, reg, proposal), 'Approval recorded on-chain.');
         if (el.dataset.user) await c.api.post('/api/admin/roles/refresh', { userId: el.dataset.user });
       }, { success: false }),
     });

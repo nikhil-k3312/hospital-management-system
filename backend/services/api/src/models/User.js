@@ -71,7 +71,8 @@ const userSchema = new mongoose.Schema({
     type: [{
       _id: false,
       tokenHash: { type: String, required: true },
-      userAgentHash: { type: String, default: '' },
+      userAgentHash: { type: String, default: '' }, // hash of browser family + OS (deviceService.uaFamily)
+      via: { type: String, enum: ['bootstrap', 'otp', 'totp'], default: 'otp' }, // how this browser was proven
       createdAt: { type: Date, default: Date.now },
       lastSeenAt: { type: Date, default: Date.now },
     }],
@@ -85,6 +86,10 @@ const userSchema = new mongoose.Schema({
   totpPendingEnc: { type: String, default: '' }, // set up but not yet confirmed with a first code
   totpLastStep: { type: Number, default: null },
   totpEnabledAt: { type: Date, default: null },
+  // after an in-person identity check, an administrator may allow one set-up from any session (24 h)
+  totpEnrolAllowedUntil: { type: Date, default: null },
+  // per-user random salt of the on-chain role subject (Problem 26, review issue 14)
+  roleSalt: { type: String, default: '' },
   // Version 3 third factor, kept only so baseline B2 (CONTEXT_PROFILE=v3) can be reproduced.
   // CARMA uses TOTP instead (NIST SP 800-63B does not accept security questions as authenticators).
   // The answer is stored as a bcrypt hash
@@ -148,6 +153,8 @@ userSchema.methods.toJSON = function toJSON() {
   delete obj.totpSecretEnc;
   delete obj.totpPendingEnc;
   delete obj.totpLastStep;
+  delete obj.totpEnrolAllowedUntil;
+  delete obj.roleSalt;
   delete obj.__v;
   // Hide the other roles' (empty) profile sections. When a partial populate did
   // not select `role`, keep whatever profile fields were explicitly selected.

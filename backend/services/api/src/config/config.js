@@ -18,6 +18,21 @@ const toBool = (value, fallback) => (value === undefined || value === '' ? fallb
 
 // CARMA role thresholds (upper, lower): low risk if T > upper, medium if T >= lower, high otherwise.
 // Starting values from the plan (Problem 6); the final values come from experiments/thresholds/derive.py (decision D10).
+// Trust-score points per signal level (Problem 15, review issue 5). CONTEXT_POINTS (JSON, same shape)
+// replaces them, e.g. with the values calibrated on the RBA dataset (experiments/rba/calibrate.py).
+const DEFAULT_POINTS = {
+  location: { near: 35, mid: 20, unknown: 15, far: 5 },
+  device: { trusted: 25, new: 10 },
+  time: { duty: 20, off: 10 },
+  network: { hospital: 20, known: 15, new: 5 },
+  penalty: { perFailure: 10, max: 30 },
+};
+function parsePoints(raw) {
+  if (!raw) return DEFAULT_POINTS;
+  const given = JSON.parse(raw);
+  return Object.fromEntries(Object.entries(DEFAULT_POINTS).map(([k, v]) => [k, { ...v, ...(given[k] || {}) }]));
+}
+
 const threshold = (role, upper, lower) => ({
   upper: toInt(env[`RISK_${role.toUpperCase()}_UPPER`], upper),
   lower: toInt(env[`RISK_${role.toUpperCase()}_LOWER`], lower),
@@ -107,6 +122,7 @@ const config = {
     enabled: toBool(env.LEDGER_ANCHORING, true),
     intervalMinutes: toInt(env.ANCHOR_INTERVAL_MINUTES, 10),
     everyEntries: toInt(env.ANCHOR_EVERY_ENTRIES, 100),
+    minSecondsBetween: toInt(env.ANCHOR_MIN_SECONDS, 60), // at most one entry-triggered anchor per chain per minute
   },
 
   files: {
@@ -157,6 +173,10 @@ const config = {
     },
     // Problem 5: the low tier needs fewer than this many failed attempts since the last sign-in.
     failureGate: toInt(env.FAILURE_GATE, 2),
+    points: parsePoints(env.CONTEXT_POINTS),
+    // Problem 8 / review issue 6: when a session's network changes at refresh, "rescore" re-checks the
+    // new context and continues silently if it is low risk; "reauth" always asks for a new sign-in.
+    refreshOnNetworkChange: env.REFRESH_ON_NETWORK_CHANGE || 'rescore',
   },
 
   frontendDir: path.resolve(__dirname, '../../../../../frontend'),
@@ -185,6 +205,14 @@ function validateConfig(cfg = config, rawEnv = env) {
   if (cfg.isProduction && cfg.email.transport !== 'smtp') {
     throw new Error('EMAIL_TRANSPORT must be "smtp" in production');
   }
+
+  const p = cfg.context.points;
+  const levels = ['location', 'device', 'time', 'network'];
+  const allValues = [...levels.flatMap((k) => Object.values(p[k])), p.penalty.perFailure, p.penalty.max];
+  if (!allValues.every((v) => Number.isInteger(v) && v >= 0)) throw new Error('CONTEXT_POINTS: every value must be a whole number >= 0');
+  const best = levels.reduce((sum, k) => sum + Math.max(...Object.values(p[k])), 0);
+  if (best !== 100) throw new Error(`CONTEXT_POINTS: the best level of each signal must add up to 100 (got ${best})`);
+  if (!['rescore', 'reauth'].includes(cfg.context.refreshOnNetworkChange)) throw new Error('REFRESH_ON_NETWORK_CHANGE must be rescore or reauth');
 
   if (!['carma', 'v3', 'static'].includes(cfg.context.profile)) {
     throw new Error(`CONTEXT_PROFILE must be carma, v3 or static (got "${cfg.context.profile}")`);

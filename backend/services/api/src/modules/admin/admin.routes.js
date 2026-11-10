@@ -134,7 +134,14 @@ router.patch('/doctors/:id/verify', validate({
   emailService.sendApprovalDecision(user.email, user.fullName, approved, req.body.note);
   // Problem 26: with the on-chain registry, this approval is only the off-chain check of the
   // credentials; the role becomes valid once k administrators approve it on-chain.
-  const registry = approved && roleService.enabled ? { proposeTx: roleService.proposeTx({ action: 'grant', userId: user._id.toString(), role: user.role }) } : null;
+  let registry = null;
+  if (approved && roleService.enabled) {
+    const salt = await RoleService.ensureSalt(user);
+    registry = {
+      proposeTx: roleService.proposeTx({ action: 'grant', userId: user._id.toString(), salt, role: user.role }),
+      verify: { action: 'grant', userId: user._id.toString(), salt, role: user.role, fullName: user.fullName }, // the browser re-checks the data
+    };
+  }
   res.json({
     success: true,
     message: registry ? 'Credentials approved. Now propose the role in the role registry (needs approval by other administrators).' : `Account ${approved ? 'approved' : 'rejected'}`,
@@ -149,7 +156,10 @@ router.patch('/doctors/:id/verify', validate({
 router.post('/users/:id/reset-totp', validate({ params: Joi.object({ id: objectId().required() }) }), asyncHandler(async (req, res) => {
   const user = await User.findById(req.params.id);
   if (!user) throw notFound('User not found');
-  Object.assign(user, { totpEnabled: false, totpSecretEnc: '', totpPendingEnc: '', totpLastStep: null, totpEnabledAt: null });
+  // Use only after checking the person's identity (in person or by phone call-back): the reset also
+  // allows ONE authenticator set-up from any of their sessions within 24 h (Problem 2).
+  Object.assign(user, { totpEnabled: false, totpSecretEnc: '', totpPendingEnc: '', totpLastStep: null, totpEnabledAt: null,
+    totpEnrolAllowedUntil: new Date(Date.now() + 24 * 3600 * 1000) });
   await user.save({ validateBeforeSave: false });
   await invalidateSession(user._id);
   await tokenService.revokeAllRefreshTokens(user._id.toString()); // sessions proven with the old app end
@@ -157,15 +167,19 @@ router.post('/users/:id/reset-totp', validate({ params: Joi.object({ id: objectI
     chain: 'records', entityType: 'user', entityId: user._id, action: 'TOTP_RESET',
     actorId: req.user.userId, actorRole: 'admin', payload: { totpEnabled: false },
   });
-  res.json({ success: true, message: 'Authenticator reset. The user sets up a new one at the next sign-in.' });
+  emailService.sendSecurityNotice(user.email, user.fullName, 'An administrator reset the authenticator app of your MediChain account. Set up a new one at your next sign-in (within 24 hours).');
+  res.json({ success: true, message: 'Authenticator reset. The user sets up a new one at the next sign-in (within 24 h).' });
 }));
 
 /* ---------------------------------------------------------------- on-chain role registry (Problem 26) */
 
 /** Staff accounts keyed by their on-chain subject hash. */
 async function staffBySubject() {
-  const staff = await User.find({ role: { $in: roleService.STAFF_ROLES } }).select('fullName email role approvalStatus isActive').lean();
-  return new Map(staff.map((u) => [RoleService.subjectOf(u._id.toString()), { _id: u._id, fullName: u.fullName, email: u.email, role: u.role, approvalStatus: u.approvalStatus, isActive: u.isActive }]));
+  const staff = await User.find({ role: { $in: roleService.STAFF_ROLES } }).select('fullName email role approvalStatus isActive roleSalt').lean();
+  return new Map(staff.map((u) => [
+    u.roleSalt ? RoleService.subjectOf(u._id.toString(), u.roleSalt) : `unregistered:${u._id}`,
+    { _id: u._id, fullName: u.fullName, email: u.email, role: u.role, approvalStatus: u.approvalStatus, isActive: u.isActive, roleSalt: u.roleSalt },
+  ]));
 }
 
 const requireRegistry = () => {
@@ -179,10 +193,11 @@ router.get('/roles/registry', asyncHandler(async (req, res) => {
   const staff = await Promise.all([...bySubject.values()].map(async (u) => {
     let onChain = null;
     try {
-      const code = await roleService.roleCode(u._id.toString());
+      const code = await roleService.roleCode(u._id.toString(), u.roleSalt);
       onChain = Object.keys(ROLE_CODE).find((k) => ROLE_CODE[k] === code) || null;
     } catch (error) { onChain = 'unavailable'; }
-    return { ...u, onChain };
+    const { roleSalt, ...rest } = u;
+    return { ...rest, onChain };
   }));
   res.json({ success: true, data: { ...status, staff } });
 }));
@@ -190,7 +205,8 @@ router.get('/roles/registry', asyncHandler(async (req, res) => {
 /** GET /api/admin/roles/proposals: newest proposals, with the staff account they concern. */
 router.get('/roles/proposals', asyncHandler(async (req, res) => {
   requireRegistry();
-  res.json({ success: true, data: await roleService.proposals({ subjectToUser: await staffBySubject() }) });
+  const bySubject = new Map([...(await staffBySubject())].map(([k, { roleSalt, ...u }]) => [k, u]));
+  res.json({ success: true, data: await roleService.proposals({ subjectToUser: bySubject }) });
 }));
 
 /**
@@ -208,14 +224,22 @@ router.post('/roles/proposals', validate({ body: Joi.object({
   requireRegistry();
   const { action, userId, account, newThreshold } = req.body;
   let role;
+  let salt;
+  let fullName;
   if (userId) {
     const user = await User.findById(userId);
     if (!user || !roleService.STAFF_ROLES.includes(user.role)) throw badRequest('Only doctors, insurance agents and administrators are registered on-chain.');
     // the licence/employer check happens off-chain first (Verification page)
     if (action === 'grant' && user.approvalStatus !== 'approved') throw conflict('Verify the credentials first (Verification page).', 'NOT_VERIFIED');
     role = user.role;
+    salt = await RoleService.ensureSalt(user);
+    fullName = user.fullName;
   }
-  res.json({ success: true, data: { tx: roleService.proposeTx({ action, userId, role, account, newThreshold }) } });
+  res.json({ success: true, data: {
+    tx: roleService.proposeTx({ action, userId, salt, role, account, newThreshold }),
+    // what the administrator's browser recomputes and shows before the wallet signs (review issue 4)
+    verify: { action, userId: userId || null, salt: salt || null, role: role || null, fullName: fullName || null, account: account || null, newThreshold: newThreshold || null },
+  } });
 }));
 
 /** POST /api/admin/roles/proposals/:id/approve: transaction for another administrator's approval. */

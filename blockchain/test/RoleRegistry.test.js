@@ -85,6 +85,17 @@ describe('RoleRegistry (2 of 3)', () => {
     await expect(registry.connect(a1).propose(ACTION.RemoveGovernor, NONE, 0, a2.address, 0)).to.be.revertedWith('would fall below threshold');
   });
 
+  it('removing a governor voids the approvals he already gave on pending proposals', async () => {
+    // a1 (compromised) proposes a grant; before anyone else approves, a2 + a3 remove a1
+    await proposeGrant(a1, 'attacker');
+    await registry.connect(a2).propose(ACTION.RemoveGovernor, NONE, 0, a1.address, 0);
+    await registry.connect(a3).approve(1);
+    expect(await registry.isGovernor(a1.address)).to.equal(false);
+    // a1's approval on proposal 0 no longer counts: a second approval cannot execute it
+    await expect(registry.connect(a2).approve(0)).to.be.revertedWith('governors changed: propose again');
+    expect(await registry.hasRole(subject('attacker'), DOCTOR)).to.equal(false);
+  });
+
   it('proposals expire after 7 days and can be cancelled by the proposer', async () => {
     await proposeGrant(a1, 'doc1');
     await ethers.provider.send('evm_increaseTime', [7 * 24 * 3600 + 1]);

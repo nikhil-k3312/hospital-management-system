@@ -102,10 +102,27 @@ def main():
     print(text)
     open(os.path.join(OUT, 'weights_rba.txt'), 'w').write(text + '\n')
     json.dump(result, open(os.path.join(OUT, 'weights_rba.json'), 'w'), indent=2)
-    # weights file in the format derive.py --weights expects
-    w = result['ato']['weights']
-    json.dump({'L': args.location_weight, 'D': w['device'], 'T': w['time'], 'N': w['network']},
-              open(os.path.join(OUT, 'weights_for_derive.json'), 'w'))
+    # Points file for the API (CONTEXT_POINTS), derive.py --points and evaluate.py --points.
+    # Location keeps its band ratios (35/20/15/5 of 35) scaled to the AHP weight; the dataset cannot
+    # tell the hospital network from a known one, so both get the calibrated "known" points.
+    if 'ato' in result:
+        lw = int(round(args.location_weight))
+        loc = {'near': lw, 'mid': round(lw * 20 / 35), 'unknown': round(lw * 15 / 35), 'far': round(lw * 5 / 35)}
+        lp = result['ato']['level_points']
+        pts = {'location': loc, 'device': dict(lp['device']), 'time': dict(lp['time']),
+               'network': {'hospital': lp['network']['known'], 'known': lp['network']['known'], 'new': lp['network']['new']},
+               'penalty': {'perFailure': 10, 'max': 30}}
+        # whole points must add up to exactly 100 at the best level of each signal: fix rounding
+        best = lambda: sum(max(pts[k].values()) for k in ('location', 'device', 'time', 'network'))
+        while best() != 100:
+            k = max(('device', 'time', 'network'), key=lambda k: max(pts[k].values()))
+            top = max(pts[k], key=pts[k].get)
+            pts[k][top] += 1 if best() < 100 else -1
+            if k == 'network' and top in ('hospital', 'known'):
+                pts['network']['hospital'] = pts['network']['known'] = pts[k][top]
+        json.dump(pts, open(os.path.join(OUT, 'context_points.json'), 'w'), indent=2)
+        open(os.path.join(OUT, 'context_points.env'), 'w').write(f"CONTEXT_POINTS={json.dumps(pts, separators=(',', ':'))}\n")
+        print(f"\nPoints for the API: {pts}\n(out/context_points.json; the line in out/context_points.env goes into the API .env if adopted)")
     print(f"\nWritten to {OUT}. Send me weights_rba.txt and lr_table.csv.")
 
 

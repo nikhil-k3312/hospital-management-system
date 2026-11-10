@@ -32,6 +32,31 @@ DRAFT_T = {'patient': (80, 50), 'insurance': (80, 55),         # first draft of 
 ROLE_T = {'patient': (65, 50), 'insurance': (70, 55),          # CARMA, recalibrated (Table III)
           'doctor': (70, 55), 'admin': (80, 60)}
 
+# ---- final inputs, when they exist (review issue 10): thresholds from ../thresholds/out/derived.env
+# (policy method, D10) and trust-score points from ../rba/out/context_points.json (calibration).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ENV = os.path.join(_HERE, '..', 'thresholds', 'out', 'derived.env')
+_PTS = os.path.join(_HERE, '..', 'rba', 'out', 'context_points.json')
+INPUTS = {'thresholds': 'starting values (Table III)', 'points': 'default 35/25/20/20'}
+if os.path.exists(_ENV):
+    import re
+    _map = {'PATIENT': 'patient', 'INSURANCE_AGENT': 'insurance', 'DOCTOR': 'doctor', 'ADMIN': 'admin'}
+    _t = {r: list(v) for r, v in ROLE_T.items()}
+    for line in open(_ENV):
+        m = re.match(r'RISK_([A-Z_]+)_(UPPER|LOWER)=(\d+)', line.strip())
+        if m and m.group(1) in _map:
+            _t[_map[m.group(1)]][0 if m.group(2) == 'UPPER' else 1] = int(m.group(3))
+    ROLE_T = {r: tuple(v) for r, v in _t.items()}
+    INPUTS['thresholds'] = _ENV
+if os.path.exists(_PTS):
+    _p = json.load(open(_PTS))
+    LOC.update(_p['location']); DEV.update(_p['device']); TIME.update(_p['time']); NET.update(_p['network'])
+    W0 = {'L': max(LOC.values()), 'D': max(DEV.values()), 'T': max(TIME.values()), 'N': max(NET.values())}
+    LEVEL = {'L': {k: v / W0['L'] for k, v in LOC.items()}, 'D': {k: v / W0['D'] for k, v in DEV.items()},
+             'T': {k: v / W0['T'] for k, v in TIME.items()}, 'N': {k: v / W0['N'] for k, v in NET.items()}}
+    INPUTS['points'] = _PTS
+print(f"decision model inputs: thresholds = {INPUTS['thresholds']}; points = {INPUTS['points']}")
+
 def score(ctx, w=W0, penalty_step=10, penalty_cap=30):
     loc, dev, tim, net, f = ctx
     s = (w['L'] * LEVEL['L'][loc] + w['D'] * LEVEL['D'][dev] +

@@ -9,7 +9,7 @@ const ledgerAnchorSchema = new mongoose.Schema({
   chain: { type: String, enum: ['records', 'access'], required: true },
   seq: { type: Number, required: true },
   headHash: { type: String, required: true },
-  status: { type: String, enum: ['anchored', 'pending', 'disabled'], required: true },
+  status: { type: String, enum: ['anchored', 'pending', 'disabled', 'refused'], required: true }, // refused = ledger tampered
   txHash: { type: String, default: null },
   blockNumber: { type: Number, default: null },
   gasUsed: { type: Number, default: null },

@@ -16,6 +16,7 @@ const ABI = [
   'function anchorLedgerHead(bytes32 chainId, uint64 seq, bytes32 headHash)',
   'function latestLedgerHead(address hospital, bytes32 chainId) view returns (tuple(uint64 seq, bytes32 headHash, uint64 anchoredAt))',
   'function ledgerHeadCount(address hospital, bytes32 chainId) view returns (uint256)',
+  'function ledgerHeadAt(address hospital, bytes32 chainId, uint256 index) view returns (tuple(uint64 seq, bytes32 headHash, uint64 anchoredAt))',
 ];
 
 const KIND = { record: 1, file: 2, ledger: 3 };
@@ -116,6 +117,24 @@ class BlockchainService {
         checked: true, exists: true, seq: Number(head.seq), headHash: head.headHash.slice(2),
         anchoredAt: new Date(Number(head.anchoredAt) * 1000).toISOString(),
       };
+    } catch (error) {
+      return { checked: false, reason: 'chain_unreachable' };
+    }
+  }
+
+  /** Every anchored head of a chain, oldest first: { checked: true, heads: [...] } or { checked: false, reason }. */
+  async ledgerHeads(chain) {
+    if (!this.enabled) return { checked: false, reason: 'chain_disabled' };
+    try {
+      const hospital = await this.hospitalAddress();
+      const id = BlockchainService.chainId(chain);
+      const count = Number(await this.registry().ledgerHeadCount(hospital, id));
+      const heads = [];
+      for (let i = 0; i < count; i += 1) {
+        const h = await this.registry().ledgerHeadAt(hospital, id, i);
+        heads.push({ seq: Number(h.seq), headHash: h.headHash.slice(2), anchoredAt: new Date(Number(h.anchoredAt) * 1000).toISOString() });
+      }
+      return { checked: true, heads };
     } catch (error) {
       return { checked: false, reason: 'chain_unreachable' };
     }

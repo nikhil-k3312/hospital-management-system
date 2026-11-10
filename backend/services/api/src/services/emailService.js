@@ -122,6 +122,25 @@ class EmailService {
       return null;
     }
   }
+
+  /**
+   * Security notice (Problem 2): sent whenever an authenticator app is set up, replaced or reset,
+   * so the owner learns at once if someone else did it. Never throws.
+   */
+  async sendSecurityNotice(email, name, what) {
+    try {
+      return await this.send({
+        to: email,
+        subject: 'MediChain security notice',
+        text: `Hello ${name}, ${what} If this was not you, contact the hospital immediately: an administrator can reset it.`,
+        html: layout('Security notice', `<p>Hello <strong>${escapeHtml(name)}</strong>,</p><p>${escapeHtml(what)}</p>
+          <p><strong>If this was not you</strong>, contact the hospital immediately: an administrator can reset it and end all sessions.</p>`),
+      });
+    } catch (error) {
+      logger.error(`Security notice email failed: ${error.message}`);
+      return null;
+    }
+  }
 }
 
 module.exports = new EmailService();

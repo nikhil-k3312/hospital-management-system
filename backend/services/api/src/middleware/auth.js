@@ -25,7 +25,7 @@ async function loadSessionState(userId) {
   const cached = await redisClient.get(sessionKey(userId));
   if (cached) return JSON.parse(cached);
 
-  const user = await User.findById(userId).select('isActive isVerified failedLoginAttempts approvalStatus role totpEnabled').lean();
+  const user = await User.findById(userId).select('isActive isVerified failedLoginAttempts approvalStatus role totpEnabled roleSalt').lean();
   if (!user) return null;
   const state = {
     isActive: user.isActive,
@@ -34,6 +34,7 @@ async function loadSessionState(userId) {
     approvalStatus: user.approvalStatus,
     role: user.role,
     totpEnabled: Boolean(user.totpEnabled),
+    roleSalt: user.roleSalt || '',
   };
   await redisClient.setEx(sessionKey(userId), SESSION_CACHE_SECONDS, JSON.stringify(state));
   return state;
@@ -107,7 +108,7 @@ async function authenticate(req, res, next) {
   if (roleService.enabled && roleService.STAFF_ROLES.includes(decoded.role)) {
     let held;
     try {
-      held = await roleService.hasRole(decoded.userId, decoded.role);
+      held = await roleService.hasRole(decoded.userId, decoded.role, sessionState.roleSalt);
     } catch (error) {
       return deny(req, res, 503, 'role_registry_unavailable', 'The role registry cannot be reached. Please try again shortly.', { userId: decoded.userId });
     }

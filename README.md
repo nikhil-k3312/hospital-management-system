@@ -156,7 +156,13 @@ of the improvement plan:
 | 11 | Time windows evaluated in the hospital time zone | `trustService.js` |
 | 12 | `AUDIT_EVERY_REQUEST` switch (experiment only) | `middleware/auth.js` |
 | 25 | 4-validator Hyperledger Besu QBFT network | `blockchain/besu-qbft/` |
-| 26 | On-chain k-of-n register of staff roles; admins approve with their own wallet | `RoleRegistry.sol`, `roleService.js`, admin page "Role Registry" |
+| 26 | On-chain k-of-n register of staff roles; admins approve with their own wallet; approvals void when the governor set changes; the page decodes and checks every transaction before signing; salted subjects | `RoleRegistry.sol`, `roleService.js`, `js/keccak.js`, admin page "Role Registry" |
+
+Review fixes (10 Nov): anchoring reads its starting point from the contract and verification checks
+every anchored head; authenticator set-up only on the first-login browser (or with an admin's
+24-hour allowance) plus an e-mail notice; trust-score points configurable (`CONTEXT_POINTS`);
+network change at refresh re-scored (`REFRESH_ON_NETWORK_CHANGE`); trusted device bound to browser
+family + OS; anchor rate cap (`ANCHOR_MIN_SECONDS`); one IP-hash function everywhere; pilot scripts.
 
 New settings are documented in `.env.example`. Tests: `npm test` in `backend/services/api`
 (new: `tests/integration/carma.test.js`, `tests/unit/totpService.test.js`) and `npx hardhat test`

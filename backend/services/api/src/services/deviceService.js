@@ -19,14 +19,36 @@ const cookieOptions = () => ({
   maxAge: config.devices.trustDays * 24 * 60 * 60 * 1000,
 });
 
+/**
+ * Browser family + operating system of a user-agent string, e.g. "Chrome|Windows" (Problem 4,
+ * review issue 7). Binding a device to the exact user-agent forgot it at every browser update
+ * (about monthly). An unrecognised user-agent is kept whole. The cookie itself (random, HttpOnly)
+ * remains the real possession factor; the family check only stops a cookie copied into a
+ * clearly different browser.
+ */
+function uaFamily(ua = '') {
+  const s = String(ua || '');
+  const browser = /Edg\//.test(s) ? 'Edge' : /OPR\/|Opera/.test(s) ? 'Opera' : /Firefox\//.test(s) ? 'Firefox'
+    : /Chrome\/|CriOS\//.test(s) ? 'Chrome' : /Safari\//.test(s) && /Version\//.test(s) ? 'Safari' : null;
+  const os = /Windows NT/.test(s) ? 'Windows' : /iPhone|iPad|iPod/.test(s) ? 'iOS' : /Android/.test(s) ? 'Android'
+    : /Mac OS X|Macintosh/.test(s) ? 'macOS' : /CrOS/.test(s) ? 'ChromeOS' : /Linux/.test(s) ? 'Linux' : null;
+  return browser && os ? `${browser}|${os}` : s;
+}
+
 function isFresh(device, now = Date.now()) {
   return now - new Date(device.lastSeenAt).getTime() < config.devices.trustDays * 24 * 60 * 60 * 1000;
 }
 
-/** Called after a successful first-time (or full) login: issue and store a device token. */
-async function trust(req, res, user) {
+/**
+ * Called after a successful full login: issue and store a device token.
+ * `via` records how the browser was proven (Problem 2): 'bootstrap' = the very first login,
+ * 'totp' = a login with the authenticator app, 'otp' = password + emailed code only. Only
+ * 'bootstrap' and 'totp' browsers may set up an authenticator app, because a password + mailbox
+ * attacker can make his own browser an 'otp' one.
+ */
+async function trust(req, res, user, via = 'otp') {
   const token = crypto.randomBytes(32).toString('hex');
-  const device = { tokenHash: sha256(token), userAgentHash: sha256(req.get('user-agent') || ''), createdAt: new Date(), lastSeenAt: new Date() };
+  const device = { tokenHash: sha256(token), userAgentHash: sha256(uaFamily(req.get('user-agent'))), via, createdAt: new Date(), lastSeenAt: new Date() };
   await User.updateOne({ _id: user._id }, { $push: { trustedDevices: { $each: [device], $slice: -MAX_DEVICES } } });
   res.cookie(DEVICE_COOKIE, token, cookieOptions());
 }
@@ -44,11 +66,13 @@ async function recognise(req) {
   if (!user || !user.isActive) return null;
 
   const device = user.trustedDevices.find((d) => d.tokenHash === tokenHash);
-  // A cookie copied to a different browser no longer matches the stored user-agent hash.
-  if (!isFresh(device) || device.userAgentHash !== sha256(req.get('user-agent') || '')) return null;
+  // A cookie copied into a different browser (family or OS) no longer matches. Devices stored
+  // before this change kept the exact user-agent hash, which is still accepted.
+  const ua = req.get('user-agent') || '';
+  if (!isFresh(device) || ![sha256(uaFamily(ua)), sha256(ua)].includes(device.userAgentHash)) return null;
 
   await User.updateOne({ _id: user._id, 'trustedDevices.tokenHash': tokenHash }, { $set: { 'trustedDevices.$.lastSeenAt': new Date() } });
-  return { user };
+  return { user, device: { via: device.via || 'otp' } }; // devices from before Problem 2 count as 'otp'
 }
 
 /** Forgets every device (used after a password change). */
@@ -57,4 +81,4 @@ async function forgetAll(res, userId) {
   res.clearCookie(DEVICE_COOKIE, { ...cookieOptions(), maxAge: undefined });
 }
 
-module.exports = { trust, recognise, forgetAll, DEVICE_COOKIE };
+module.exports = { trust, recognise, forgetAll, uaFamily, DEVICE_COOKIE };

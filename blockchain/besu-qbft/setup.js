@@ -9,6 +9,10 @@
  * Optional environment variables:
  *   BESU_IMAGE  Docker image, default hyperledger/besu:24.12.2 (any recent 24.x/25.x tag works)
  *   GOVERNORS   comma-separated administrator wallet addresses to fund (otherwise 3 demo wallets are made)
+ *   HOST_IPS    four LAN addresses, e.g. 192.168.1.21,192.168.1.22,192.168.1.23,192.168.1.24, to run each
+ *               validator on its OWN computer (review issue 16: four containers on one laptop show the
+ *               protocol, but only separate machines, ideally run by separate parties, are a real
+ *               consortium). Writes machines/validatorN/ folders to copy to each computer.
  *
  * Output (in besu-qbft/generated/, never commit it: it holds private keys):
  *   genesis.json, validator1..4/key, docker-compose.yml (one level up), accounts.json
@@ -79,6 +83,50 @@ function main() {
     return { name: `validator${i + 1}`, address, ip: `${SUBNET}.${11 + i}`, enode: `enode://${pub}@${SUBNET}.${11 + i}:30303` };
   });
 
+  const hostIps = (process.env.HOST_IPS || '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (hostIps.length && hostIps.length !== 4) throw new Error('HOST_IPS needs exactly 4 addresses');
+  if (hostIps.length) {
+    nodes.forEach((n, i) => { n.ip = hostIps[i]; n.enode = n.enode.replace(/@[^:]+:/, `@${hostIps[i]}:`); });
+    nodes.forEach((n) => {
+      const dir = path.join(HERE, 'machines', n.name);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.copyFileSync(path.join(OUT, 'genesis.json'), path.join(dir, 'genesis.json'));
+      fs.copyFileSync(path.join(OUT, n.name, 'key'), path.join(dir, 'key'));
+      fs.writeFileSync(path.join(dir, 'docker-compose.yml'), `# ${n.name} on ${n.ip}. Copy this folder to that computer and run: docker compose up -d
+# Open TCP+UDP port 30303 (peer-to-peer) in its firewall; 8545 only for the API's computer.
+services:
+  ${n.name}:
+    image: ${IMAGE}
+    container_name: medichain-${n.name}
+    restart: unless-stopped
+    command:
+      - --data-path=/opt/besu/data
+      - --genesis-file=/opt/besu/genesis.json
+      - --node-private-key-file=/opt/besu/key
+      - --p2p-host=${n.ip}
+      - --p2p-port=30303
+      - --bootnodes=${nodes.filter((o) => o !== n).map((o) => o.enode).join(',')}
+      - --rpc-http-enabled
+      - --rpc-http-host=0.0.0.0
+      - --rpc-http-port=8545
+      - --rpc-http-api=ETH,NET,WEB3,QBFT,TXPOOL
+      - --host-allowlist=*
+      - --min-gas-price=0
+    ports:
+      - "30303:30303/tcp"
+      - "30303:30303/udp"
+      - "8545:8545"
+    volumes:
+      - ./genesis.json:/opt/besu/genesis.json:ro
+      - ./key:/opt/besu/key:ro
+      - data:/opt/besu/data
+volumes:
+  data:
+`);
+    });
+    console.log(`Per-machine folders written to ${path.join(HERE, 'machines')} (they contain validator keys: copy each only to its own computer).`);
+  }
+
   // 3. docker-compose.yml: validator1 exposes the JSON-RPC port 8545 to the laptop; validator2 8546 (spare entry point)
   const service = (n, i) => `  ${n.name}:
     image: ${IMAGE}
@@ -119,7 +167,7 @@ networks:
 volumes:
 ${nodes.map((n) => `  ${n.name}-data:`).join('\n')}
 `;
-  fs.writeFileSync(path.join(HERE, 'docker-compose.yml'), compose);
+  if (!hostIps.length) fs.writeFileSync(path.join(HERE, 'docker-compose.yml'), compose); // one-laptop version
 
   const accounts = {
     chainId: CHAIN_ID, rpc: 'http://127.0.0.1:8545',

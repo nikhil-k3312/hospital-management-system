@@ -37,10 +37,10 @@ async function main() {
 
   await connectMongo();
   const staff = await User.find({ $or: [{ role: 'admin' }, { role: { $in: ['doctor', 'insurance_agent'] }, approvalStatus: 'approved' }], isActive: true })
-    .select('fullName email role').lean();
+    .select('fullName email role roleSalt');
   const todo = [];
   for (const u of staff) {
-    const subject = RoleService.subjectOf(u._id.toString());
+    const subject = RoleService.subjectOf(u._id.toString(), await RoleService.ensureSalt(u));
     if (Number(await registry.roleOf(subject)) === 0) todo.push({ u, subject, code: ROLE_CODE[u.role] });
   }
   todo.forEach(({ u }) => console.log(`  ${u.role.padEnd(16)} ${u.fullName} <${u.email}>`));

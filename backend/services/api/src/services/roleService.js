@@ -12,8 +12,10 @@ const logger = require('../utils/logger');
  * never holds an administrator key. A role edited directly in MongoDB, or granted by one
  * compromised administrator account, therefore gives no access.
  *
- * On chain a user is identified only by keccak256("medichain-user:<user id>"): no names,
- * emails or other personal data. Answers are cached in Redis for ROLE_CACHE_SECONDS; if the
+ * On chain a user is identified only by keccak256("medichain-user:<user id>:<salt>"), with a random
+ * per-user salt kept in MongoDB: no names or emails, and someone who knows a user id still cannot
+ * look up that person's role (review issue 14). The administrator's browser recomputes the subject
+ * from the id and salt before signing (review issue 4). Answers are cached in Redis for ROLE_CACHE_SECONDS; if the
  * chain cannot be reached, an older answer (at most ROLE_STALE_SECONDS) is used, after that
  * the check fails closed.
  */
@@ -31,7 +33,8 @@ const ABI = [
   'function isGovernor(address account) view returns (bool)',
   'function bootstrapOpen() view returns (bool)',
   'function proposalCount() view returns (uint256)',
-  'function getProposal(uint256 id) view returns (tuple(uint8 action, bytes32 subject, uint8 role, address account, uint8 newThreshold, address proposer, uint64 createdAt, uint8 approvals, bool executed, bool cancelled))',
+  'function getProposal(uint256 id) view returns (tuple(uint8 action, bytes32 subject, uint8 role, address account, uint8 newThreshold, address proposer, uint64 createdAt, uint8 approvals, bool executed, bool cancelled, uint32 epoch))',
+  'function governorEpoch() view returns (uint32)',
   'function hasApproved(uint256 id, address governor) view returns (bool)',
   'function propose(uint8 action, bytes32 subject, uint8 role, address account, uint8 newThreshold) returns (uint256)',
   'function approve(uint256 id)',
@@ -55,23 +58,35 @@ class RoleService {
 
   registry() {
     if (!this.contract) {
-      const provider = new ethers.JsonRpcProvider(this.cfg.rpcUrl);
-      this.contract = new ethers.Contract(this.cfg.roleRegistryAddress, ABI, provider); // read-only
+      this.provider = new ethers.JsonRpcProvider(this.cfg.rpcUrl);
+      this.contract = new ethers.Contract(this.cfg.roleRegistryAddress, ABI, this.provider); // read-only
     }
     return this.contract;
   }
 
-  static subjectOf(userId) {
-    return ethers.keccak256(ethers.toUtf8Bytes(`medichain-user:${userId}`));
+  static subjectOf(userId, salt) {
+    return ethers.keccak256(ethers.toUtf8Bytes(`medichain-user:${userId}:${salt}`));
+  }
+
+  /** The user's salt, created (and saved) the first time it is needed. `user` is a Mongoose document. */
+  static async ensureSalt(user) {
+    if (!user.roleSalt) {
+      user.roleSalt = require('crypto').randomBytes(16).toString('hex');
+      await user.constructor.updateOne({ _id: user._id, roleSalt: { $in: ['', null] } }, { $set: { roleSalt: user.roleSalt } });
+      const fresh = await user.constructor.findById(user._id).select('roleSalt').lean();
+      user.roleSalt = fresh.roleSalt; // another request may have created it first
+    }
+    return user.roleSalt;
   }
 
   /** The role code the contract holds for a user (0 = none), with the cache described above. */
-  async roleCode(userId) {
+  async roleCode(userId, salt) {
     const id = String(userId);
+    if (!salt) return 0; // never registered
     const cached = await redisClient.get(freshKey(id));
     if (cached !== null) return Number(cached);
     try {
-      const code = Number(await this.registry().roleOf(RoleService.subjectOf(id)));
+      const code = Number(await this.registry().roleOf(RoleService.subjectOf(id, salt)));
       await redisClient.setEx(freshKey(id), this.cfg.roleCacheSeconds, String(code));
       await redisClient.setEx(staleKey(id), this.cfg.roleStaleSeconds, String(code));
       return code;
@@ -86,9 +101,9 @@ class RoleService {
   }
 
   /** True when the contract holds exactly this staff role for the user. Patients are never checked. */
-  async hasRole(userId, role) {
+  async hasRole(userId, role, salt) {
     if (!this.enabled || !STAFF_ROLES.includes(role)) return true;
-    return (await this.roleCode(userId)) === ROLE_CODE[role];
+    return (await this.roleCode(userId, salt)) === ROLE_CODE[role];
   }
 
   async invalidate(userId) {
@@ -100,8 +115,8 @@ class RoleService {
     return { to: this.cfg.roleRegistryAddress, data: iface.encodeFunctionData(functionName, args) };
   }
 
-  proposeTx({ action, userId, role, account, newThreshold }) {
-    const subject = userId ? RoleService.subjectOf(userId) : ethers.ZeroHash;
+  proposeTx({ action, userId, salt, role, account, newThreshold }) {
+    const subject = userId ? RoleService.subjectOf(userId, salt) : ethers.ZeroHash;
     return this.tx('propose', [ACTION[action], subject, role ? ROLE_CODE[role] : 0, account || ethers.ZeroAddress, newThreshold || 0]);
   }
 
@@ -112,8 +127,12 @@ class RoleService {
   async status() {
     if (!this.enabled) return { enabled: false };
     const c = this.registry();
-    const [threshold, governorCount, bootstrapOpen, proposalCount] = await Promise.all([c.threshold(), c.governorCount(), c.bootstrapOpen(), c.proposalCount()]);
-    return { enabled: true, address: this.cfg.roleRegistryAddress, threshold: Number(threshold), governorCount: Number(governorCount), bootstrapOpen, proposalCount: Number(proposalCount) };
+    const [threshold, governorCount, bootstrapOpen, proposalCount, epoch, network] = await Promise.all([
+      c.threshold(), c.governorCount(), c.bootstrapOpen(), c.proposalCount(), c.governorEpoch(), this.provider.getNetwork()]);
+    return {
+      enabled: true, address: this.cfg.roleRegistryAddress, chainId: Number(network.chainId), threshold: Number(threshold),
+      governorCount: Number(governorCount), governorEpoch: Number(epoch), bootstrapOpen, proposalCount: Number(proposalCount),
+    };
   }
 
   /** The newest proposals (newest first). `subjectToUser` maps a subject hash to a user summary. */
@@ -139,6 +158,7 @@ class RoleService {
         approvals: Number(p.approvals),
         executed: p.executed,
         cancelled: p.cancelled,
+        epoch: Number(p.epoch),
       });
     }
     return out;

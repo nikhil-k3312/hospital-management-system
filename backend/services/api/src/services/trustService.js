@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const config = require('../config/config');
 const { ROLES_NEEDING_APPROVAL } = require('../models/User');
-const { hmac } = require('../utils/hash');
+const { ipHash } = require('../utils/hash');
 
 const BREAK_GLASS_ROLES = ['doctor', 'admin'];
 
@@ -57,7 +57,7 @@ class TrustService {
       highSensitivityMinScore: config.security.highSensitivityTrustScore,
       sessionAgeSeconds,
       deviceFingerprint: this.hashValue(userAgent),
-      ipHash: hmac(req.ip),
+      ipHash: ipHash(req.ip),
     };
   }
 

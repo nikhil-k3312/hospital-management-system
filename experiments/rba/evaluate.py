@@ -3,7 +3,7 @@ Problem 21: evaluate CARMA and the baselines on the HELD-OUT 30% of RBA users (n
 for calibration). Location is "unknown" for every login (no GPS in the dataset).
 
     python evaluate.py data/rba-dataset.csv
-    python evaluate.py data/rba-dataset.csv --weights out/weights_rba.json --thresholds ../thresholds/out/derived.env
+    python evaluate.py data/rba-dataset.csv --points out/context_points.json --thresholds ../thresholds/out/derived.env
 
 For each configuration and role it reports, for labelled account takeovers (ato) and for
 legitimate returning logins: the share that would be password-only (low), need the emailed
@@ -61,7 +61,7 @@ def auc(pos_scores, neg_scores):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('csv')
-    ap.add_argument('--weights', help='out/weights_rba.json from calibrate.py (uses its "ato" level points)')
+    ap.add_argument('--points', help='out/context_points.json from calibrate.py (the calibrated points)')
     ap.add_argument('--thresholds', help='derived.env from ../thresholds/derive.py')
     ap.add_argument('--sample', type=float, default=100)
     args = ap.parse_args()
@@ -69,10 +69,10 @@ def main():
 
     pts = CARMA_POINTS
     location_points = LOCATION_UNKNOWN
-    if args.weights:
-        cal = json.load(open(args.weights))
-        pts = {s: cal['ato']['level_points'][s] for s in ('device', 'network', 'time')}
-        location_points = round(cal['location_weight'] * 15 / 35)
+    if args.points:
+        cal = json.load(open(args.points))
+        pts = {'device': cal['device'], 'time': cal['time'], 'network': {'known': cal['network']['known'], 'new': cal['network']['new']}}
+        location_points = cal['location']['unknown']
     thresholds = read_env_thresholds(args.thresholds) if args.thresholds else DEFAULT_T
 
     df = features(load(args.csv, sample_pct=args.sample))

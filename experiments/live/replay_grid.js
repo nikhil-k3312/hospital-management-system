@@ -11,15 +11,13 @@
  */
 const h = require('./harness');
 
-const LOC = { near: 35, mid: 20, unknown: 15, far: 5 };
-const DEV = { trusted: 25, new: 10 };
-const TIME = { duty: 20, off: 10 };
-const NET = { hospital: 20, known: 15, new: 5 };
+// level names; the points come from the API's configuration (CONTEXT_POINTS or the defaults)
+const LEVELS = { location: ['near', 'mid', 'unknown', 'far'], device: ['trusted', 'new'], time: ['duty', 'off'], network: ['hospital', 'known', 'new'] };
 const ROLES = ['patient', 'insurance_agent', 'doctor', 'admin'];
 
 /** The paper's decision function, written independently of contextService. */
-function model({ loc, dev, time, net, f }, role, profile, thresholds) {
-  const T = Math.max(0, Math.min(100, LOC[loc] + DEV[dev] + TIME[time] + NET[net] - Math.min(30, 10 * f)));
+function model({ loc, dev, time, net, f }, role, profile, thresholds, P) {
+  const T = Math.max(0, Math.min(100, P.location[loc] + P.device[dev] + P.time[time] + P.network[net] - Math.min(P.penalty.max, P.penalty.perFailure * f)));
   if (profile === 'static') return { T, tier: 'medium' };
   const [U, L] = profile === 'v3' ? [80, 50] : [thresholds[role].upper, thresholds[role].lower];
   const gatesOk = profile === 'v3' || (dev === 'trusted' && f < 2);
@@ -34,6 +32,8 @@ async function main() {
   h.api.config.context.hospitalNetworks = ['49.207.0.0/24'];
   Object.values(h.NETWORKS).forEach((ip) => h.gpsFor(ip, 'near')); // every address must have a GeoIP position
   const thresholds = JSON.parse(JSON.stringify(h.api.config.context.riskThresholds));
+  const points = JSON.parse(JSON.stringify(h.api.config.context.points));
+  console.log(`points: ${JSON.stringify(points)}\nthresholds: ${JSON.stringify(thresholds)}`);
   const UA = 'Replay/1.0';
 
   const users = {};
@@ -48,7 +48,7 @@ async function main() {
   let mismatches = 0;
   for (const role of ROLES) {
     const { user, device, snap } = users[role];
-    for (const loc of Object.keys(LOC)) for (const dev of Object.keys(DEV)) for (const time of Object.keys(TIME)) for (const net of Object.keys(NET)) for (let f = 0; f <= 3; f += 1) {
+    for (const loc of LEVELS.location) for (const dev of LEVELS.device) for (const time of LEVELS.time) for (const net of LEVELS.network) for (let f = 0; f <= 3; f += 1) {
       await h.restore(user._id, snap);
       h.setDuty(time === 'duty');
       const ip = h.NETWORKS[net];
@@ -59,7 +59,7 @@ async function main() {
       const res = await h.http('POST', '/api/auth/login/dynamic', { ip, ua: UA, cookies, body: { email: user.email, password: h.PASSWORD, context: { gps: h.gpsFor(ip, loc) } } });
       const asmt = res.body?.data?.assessment;
       const apiTier = res.status === 403 && res.body.code === 'TOTP_NOT_ENROLLED' ? 'high' : asmt?.risk;
-      const m = model({ loc, dev, time, net, f }, role, profile, thresholds);
+      const m = model({ loc, dev, time, net, f }, role, profile, thresholds, points);
       const match = asmt && asmt.score === m.T && apiTier === m.tier;
       if (!match) mismatches += 1;
       rows.push({ profile, role, location: loc, device: dev, time, network: net, failures: f, api_status: res.status,

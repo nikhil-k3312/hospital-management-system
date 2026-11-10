@@ -112,6 +112,7 @@ async function main() {
     cpu: os.cpus()[0].model, cores: os.cpus().length, memoryGB: (os.totalmem() / 2 ** 30).toFixed(1), platform: `${os.type()} ${os.release()}`,
     node: process.version, mongodb: mongoVersion, redis: (redisInfo.match(/redis_version:(\S+)/) || [])[1], assessMicroseconds: Number(assessUs.toFixed(2)),
     connections: LEVELS, repetitions: REPS, durationSeconds: DURATION, date: new Date().toISOString(),
+    note: 'Rate limiting disabled during the measurement (NODE_ENV=test); ledger anchoring off (measured separately in chain_cost.js); emails not sent (captured in memory).',
   }, null, 2));
   console.log(`\nWritten to ${h.OUT}/perf.csv and perf_environment.json`);
   await h.stop();
