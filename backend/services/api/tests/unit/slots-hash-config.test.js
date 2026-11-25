@@ -1,6 +1,7 @@
 const { buildDaySlots, isValidSlot } = require('../../src/modules/appointments/slots');
 const { canonicalJSON, hashObject } = require('../../src/utils/hash');
-const { validateConfig } = require('../../src/config/config');
+const config = require('../../src/config/config');
+const { validateConfig } = config;
 const { findAbnormal } = require('../../src/models/VitalReading');
 
 describe('buildDaySlots', () => {
@@ -48,7 +49,8 @@ describe('canonical hashing', () => {
 
 describe('validateConfig', () => {
   const base = { MONGODB_URI: 'mongodb://x', JWT_SECRET: 'a', JWT_REFRESH_SECRET: 'b' };
-  const cfg = (transport, isProduction = false) => ({ email: { transport }, isProduction });
+  // The real config supplies the CARMA sections (context, audit); only email and production vary.
+  const cfg = (transport, isProduction = false) => ({ ...config, email: { transport }, isProduction });
 
   test('passes with the required variables', () => {
     expect(validateConfig(cfg('console'), base)).toBe(true);

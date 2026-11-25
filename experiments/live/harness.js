@@ -99,7 +99,8 @@ let counter = 0;
 async function createUser(role, extra = {}) {
   counter += 1;
   const user = new api.User({
-    email: `${role}${counter}@experiment.local`, fullName: `${role} ${counter}`, passwordHash: PASSWORD, role, approvalStatus: 'approved', ...extra,
+    // example.com is reserved for examples (RFC 2606); the API's email check refuses ".local"
+    email: `${role}${counter}@experiment.example.com`, fullName: `${role} ${counter}`, passwordHash: PASSWORD, role, approvalStatus: 'approved', ...extra,
   });
   if (role === 'doctor') Object.assign(user.doctorProfile, { specialization: 'Cardiology', licenseNumber: `LIC-${counter}` });
   if (role === 'insurance_agent') user.agentProfile = { company: 'Star Health' };

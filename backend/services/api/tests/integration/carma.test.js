@@ -229,6 +229,10 @@ describe('Problem 3: no readable IP address anywhere in the ledger', () => {
     await get('/api/users/me', { token: session.token });
     await get('/api/users/me', { token: 'bad' });
     await post('/api/auth/login/dynamic', { ip: UK_IP }).send({ email: user.email, password: 'Wr0ng!Pass', context: {} });
+    // a scored sign-in (after the first login) writes a login_context entry with the network hash
+    captureCodes(); // the emailed code is not needed; the mock is restored after each test
+    await post('/api/auth/login/dynamic', { ip: UK_IP }).send({ email: user.email, password: PASSWORD, context: { gps: GPS_HYDERABAD } });
+    expect(await LedgerEntry.countDocuments({ chain: 'access', entityType: 'login_context' })).toBeGreaterThan(0);
     const ipv4 = /\b(?:\d{1,3}\.){3}\d{1,3}\b/;
     const ipv6 = /\b[0-9a-f]{1,4}(?::[0-9a-f]{0,4}){2,7}\b/i;
     const entries = await LedgerEntry.find({}).lean();
@@ -380,6 +384,7 @@ describe('Problem 10: ledger heads anchored on the blockchain', () => {
 
   test('a consistent rewrite (all later hashes recomputed) passes the hash chain but fails the anchor', async () => {
     fakeChain();
+    await createUser('admin'); // the tampering alert goes to every active administrator
     await someAccessEntries();
     await anchorService.anchorHead('access');
     const all = await LedgerEntry.find({ chain: 'access' }).sort({ seq: 1 }).lean();

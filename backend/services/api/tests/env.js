@@ -18,3 +18,8 @@ process.env.TOTP_ENC_KEY = '00112233445566778899aabbccddeeff00112233445566778899
 process.env.TOTP_REQUIRED_ROLES = '';
 process.env.CONTEXT_PROFILE = 'carma';
 process.env.LEDGER_ANCHORING = 'false';
+// Never write to the developer's blockchain: the anchoring and role tests use in-memory stand-ins
+// (ipfs-blockchain.test.js has its own CHAIN_TEST_RPC switch).
+process.env.CHAIN_CONTRACT_ADDRESS = '';
+process.env.CHAIN_PRIVATE_KEY = '';
+process.env.ROLE_REGISTRY_ADDRESS = '';

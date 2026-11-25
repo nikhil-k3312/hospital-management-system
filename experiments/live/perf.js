@@ -71,7 +71,9 @@ async function main() {
       const acct = pool[next % pool.length];
       next += 1;
       client.setHeaders(headers({ 'X-Forwarded-For': ip, ...(withCookie ? { Cookie: acct.cookie } : {}) }));
-      client.setBody(loginBody(acct.email, gps)); // GPS agrees: new browser -> 35+10+20+5 = 70, medium for every role
+      // GPS agrees with the IP actually used (for the new network: new browser -> 35+10+20+5 = 70,
+      // medium for every role; the known network's position would score "far" and make it high)
+      client.setBody(loginBody(acct.email, h.gpsFor(ip, 'near')));
     };
   };
   const endpoints = [
@@ -93,7 +95,10 @@ async function main() {
         const refreshed = await h.firstLoginFresh(user, deviceCookie, gps);
         currentToken = refreshed || currentToken;
         ep.before();
-        const r = await autocannon({ url, connections, duration: DURATION, ...ep.opts() });
+        // autocannon takes the path from the URL (a top-level "path" option is ignored and every
+        // request would go to "/", the static homepage)
+        const { path: epPath, ...opts } = ep.opts();
+        const r = await autocannon({ url: url + epPath, connections, duration: DURATION, ...opts });
         const errors = r.errors + r.timeouts + (r.non2xx || 0);
         rows.push({ endpoint: ep.name, connections, rep, requests_per_s: r.requests.average.toFixed(1), latency_mean_ms: r.latency.average.toFixed(2),
           latency_p50_ms: r.latency.p50, latency_p90_ms: r.latency.p90, latency_p97_5_ms: r.latency.p97_5, latency_p99_ms: r.latency.p99,

@@ -16,6 +16,8 @@ async function enrolTotp(userId) {
 // geoip-lite places 49.207.0.1 in Hyderabad and 81.2.69.142 in St Albans (UK).
 const HYDERABAD_IP = '49.207.0.1';
 const UK_IP = '81.2.69.142';
+// A second UK network (geoip-lite: Willesden), never used before: keeps a later attempt at high risk.
+const UK_IP_2 = '185.86.151.11';
 const GPS_HYDERABAD = { lat: 17.39, lon: 78.49 };
 const UA = 'jest';
 
@@ -106,9 +108,11 @@ describe('after the first time: dynamic login algorithm', () => {
     expect(ok.body.data.mode).toBe('redirect');
     expect(cookiesOf(ok).some((c) => c.startsWith('mcDevice='))).toBe(true); // this browser is now trusted
 
-    // the same authenticator code cannot be used twice (replay)
-    const third = await post('/api/auth/login/dynamic', { ip: UK_IP, ua: 'other-browser' }).send({ email: 'arjun@example.com', password: PASSWORD, context: { gps: GPS_HYDERABAD } });
-    const replay = await post('/api/auth/login/challenge', { ip: UK_IP, ua: 'other-browser' }).send({ challengeId: third.body.data.challengeId, otp: mail.codes[2], totp: code });
+    // the same authenticator code cannot be used twice (replay). The UK network is now known
+    // (score 50 = medium, no authenticator asked), so the replay comes from another new network.
+    const third = await post('/api/auth/login/dynamic', { ip: UK_IP_2, ua: 'other-browser' }).send({ email: 'arjun@example.com', password: PASSWORD, context: { gps: GPS_HYDERABAD } });
+    expect(third.body.data.assessment.risk).toBe('high');
+    const replay = await post('/api/auth/login/challenge', { ip: UK_IP_2, ua: 'other-browser' }).send({ challengeId: third.body.data.challengeId, otp: mail.codes[2], totp: code });
     mail.restore();
     expect(replay.status).toBe(401);
     expect(replay.body.code).toBe('TOTP_REUSED');

@@ -157,4 +157,42 @@ async function verifyAnchor(chain) {
   return { ...base, valid: true };
 }
 
+/** All ledger entries for one entity, oldest first (the entity's audit trail). */
+function history(entityType, entityId) {
+  return LedgerEntry.find({ chain: 'records', entityType, entityId: String(entityId) }).sort({ seq: 1 }).lean();
+}
+
+/**
+ * Checks whether an entity still matches what the ledger last recorded for it.
+ * A direct database edit changes the entity's payload hash but cannot change
+ * the ledger (doing so would break the chain), so the two no longer agree.
+ */
+async function verifyEntity(entityType, entity) {
+  const latest = await LedgerEntry.findOne({
+    chain: 'records', entityType, entityId: String(entity._id), payloadHash: { $ne: null },
+    action: { $nin: ['FILE_ATTACHED', 'VIEW', 'BREAK_GLASS_ACCESS'] },
+  }).sort({ seq: -1 }).lean();
+
+  if (!latest) {
+    return { entityId: String(entity._id), matches: false, reason: 'no_ledger_entry' };
+  }
+  const currentHash = hashObject(entity.ledgerPayload());
+  return {
+    entityId: String(entity._id),
+    matches: currentHash === latest.payloadHash,
+    currentHash,
+    ledgerHash: latest.payloadHash,
+    ledgerSeq: latest.seq,
+  };
+}
+
+async function stats() {
+  const [records, access] = await Promise.all(['records', 'access'].map(async (chain) => {
+    const count = await LedgerEntry.countDocuments({ chain });
+    const head = await LedgerEntry.findOne({ chain }).sort({ seq: -1 }).lean();
+    return { chain, entries: count, headHash: head ? head.entryHash : null, lastEntryAt: head ? head.timestamp : null };
+  }));
+  return { records, access };
+}
+
 module.exports = { append, recordEvent, verifyChain, verifyAnchor, verifyEntity, history, stats, computeEntryHash, events };
