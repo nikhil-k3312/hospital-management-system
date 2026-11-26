@@ -82,6 +82,12 @@ class BlockchainService {
     return ethers.keccak256(ethers.toUtf8Bytes(chain));
   }
 
+  /** The hospital's signer (one NonceManager for every contract this API writes to). */
+  writer() {
+    this.registry();
+    return this.signer;
+  }
+
   /** Address this API writes with (the "hospital" whose ledger heads are looked up). */
   async hospitalAddress() {
     this.registry();

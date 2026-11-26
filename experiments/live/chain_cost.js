@@ -97,6 +97,35 @@ async function main() {
     lines.push('Role registry skipped: set ROLE_REGISTRY_ADDRESS and GOVERNOR_KEYS (two governor private keys) to measure it');
   }
 
+  // 2b. emergency sign-in review (D12): the hospital opens a case, two administrators close it
+  if (h.api.config.chain.emergencyReviewAddress && keys.length >= 2) {
+    const provider = new ethers.JsonRpcProvider(h.api.config.chain.rpcUrl);
+    const abi = ['function openCase(bytes32,bytes32,bytes32)', 'function review(bytes32,uint8)'];
+    const hospital = new ethers.Contract(h.api.config.chain.emergencyReviewAddress, abi, blockchainService.writer());
+    const r1 = new ethers.Contract(h.api.config.chain.emergencyReviewAddress, abi, new ethers.NonceManager(new ethers.Wallet(keys[0], provider)));
+    const r2 = new ethers.Contract(h.api.config.chain.emergencyReviewAddress, abi, new ethers.NonceManager(new ethers.Wallet(keys[1], provider)));
+    for (let i = 0; i < 20; i += 1) {
+      const caseId = ethers.keccak256(ethers.toUtf8Bytes(`bench-case-${Date.now()}-${i}`));
+      const subject = ethers.keccak256(ethers.toUtf8Bytes(`bench-subject-${i}`));
+      const reason = ethers.keccak256(ethers.toUtf8Bytes(`bench-reason-${i}`));
+      let t = Date.now();
+      const o = await (await hospital.openCase(caseId, subject, reason)).wait();
+      rows.push({ operation: 'emergency case open (hospital)', i, status: 'ok', gas: Number(o.gasUsed), latency_ms: Date.now() - t, block: o.blockNumber });
+      t = Date.now();
+      const v1 = await (await r1.review(caseId, 1)).wait();
+      rows.push({ operation: 'emergency review (verdict 1)', i, status: 'ok', gas: Number(v1.gasUsed), latency_ms: Date.now() - t, block: v1.blockNumber });
+      t = Date.now();
+      const v2 = await (await r2.review(caseId, 1)).wait();
+      rows.push({ operation: 'emergency review (verdict 2, closes)', i, status: 'ok', gas: Number(v2.gasUsed), latency_ms: Date.now() - t, block: v2.blockNumber });
+    }
+    ['emergency case open (hospital)', 'emergency review (verdict 1)', 'emergency review (verdict 2, closes)'].forEach((op) => {
+      const sel = rows.filter((r) => r.operation === op);
+      lines.push(`${op}: gas ${JSON.stringify(stats(sel.map((r) => r.gas)))}, ms ${JSON.stringify(stats(sel.map((r) => r.latency_ms)))}`);
+    });
+  } else {
+    lines.push('Emergency review skipped: set EMERGENCY_REVIEW_ADDRESS and GOVERNOR_KEYS (two governor private keys) to measure it');
+  }
+
   // 3. verification time vs ledger size (entries written directly, with correct hashes)
   const verifyRows = [];
   const { LedgerEntry, ledgerService } = h.api;

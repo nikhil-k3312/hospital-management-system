@@ -32,7 +32,8 @@ async function main() {
   h.api.config.context.hospitalNetworks = ['49.207.0.0/24'];
   Object.values(h.NETWORKS).forEach((ip) => h.gpsFor(ip, 'near')); // every address must have a GeoIP position
   const thresholds = JSON.parse(JSON.stringify(h.api.config.context.riskThresholds));
-  const points = JSON.parse(JSON.stringify(h.api.config.context.points));
+  // baseline B2 (v3) keeps the points Version 3 shipped with, whatever CARMA's own points are
+  const points = JSON.parse(JSON.stringify(profile === 'v3' ? h.api.config.REFERENCE_POINTS : h.api.config.context.points));
   console.log(`points: ${JSON.stringify(points)}\nthresholds: ${JSON.stringify(thresholds)}`);
   const UA = 'Replay/1.0';
 

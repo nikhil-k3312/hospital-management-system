@@ -4,9 +4,6 @@ R2,all,"New browser, IP far from GPS, new network",far,new,*,new,0,third_factor
 R3,doctor;admin;insurance_agent,"Staff: new browser, no location, new network",unknown,new,*,new,0,third_factor
 R4,admin,"Administrator on a network never used before",*,trusted,*,new,0,at_least_code
 R5,doctor,"Doctor on the enrolled ward PC, hospital network, duty hours, GPS agrees",near,trusted,duty,hospital,0,password_only
-R6,doctor,"Doctor on the enrolled ward desktop without GPS, hospital network, duty hours",unknown,trusted,duty,hospital,0,password_only
 R7,patient,"Patient at home on the enrolled device, GPS agrees, any time",near,trusted,*,known,0,password_only
-R8,patient,"Patient at home on the enrolled device without GPS, daytime",unknown,trusted,duty,known,0,password_only
-R9,insurance_agent,"Agent in the office on the enrolled device without GPS, office hours",unknown,trusted,duty,known,0,password_only
 R10,insurance_agent;doctor,"Staff device on a new network in the same region",mid,trusted,*,new,0,at_least_code
-R11,all,"Owner's enrolled device at home through a VPN must not need the authenticator",far,trusted,off,known,0,not_third_factor
+R12,doctor,"Doctor on a network never used before (guide, question 2)",*,trusted,*,new,0,at_least_code

@@ -35,8 +35,10 @@ const { hmac, ipHash } = require('../utils/hash');
  * (HMAC-SHA256 with IP_HASH_SECRET) of the IP and of the network prefix are stored;
  * GPS coordinates are used and discarded.
  */
-// Points per level come from config.context.points (CONTEXT_POINTS); the defaults are the values above.
-const P = () => config.context.points;
+// Points per level come from config.context.points (CONTEXT_POINTS or the adopted defaults). The v3
+// baseline (B2) always uses the points Version 3 shipped with (the values above, REFERENCE_POINTS), as
+// it always uses 80/50: a baseline must not move when CARMA's own settings change.
+const P = () => (config.context.profile === 'v3' ? config.REFERENCE_POINTS : config.context.points);
 const maxOf = (k) => Math.max(...Object.values(P()[k]));
 const WEIGHTS = {
   get location() { return maxOf('location'); }, get device() { return maxOf('device'); },

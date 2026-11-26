@@ -22,6 +22,9 @@ const emailService = require('../../services/emailService');
 const notificationService = require('../../services/notificationService');
 const roleService = require('../../services/roleService');
 const { RoleService, ROLE_CODE } = require('../../services/roleService');
+const emergencyReviewService = require('../../services/emergencyReviewService');
+const EmergencyCase = require('../../models/EmergencyCase');
+const { sha256 } = require('../../utils/hash');
 
 const router = express.Router();
 router.use(authenticate, requireRole('admin'));
@@ -254,6 +257,42 @@ router.post('/roles/refresh', validate({ body: Joi.object({ userId: objectId().r
   await roleService.invalidate(req.body.userId);
   await invalidateSession(req.body.userId);
   res.json({ success: true });
+}));
+
+/* ---------------------------------------------------------------- emergency reviews (D12) */
+
+/**
+ * GET /api/admin/emergency-reviews: every emergency sign-in, newest first, with its on-chain state.
+ * The verdict comes from the contract, never from MongoDB. `reasonIntact` is false when the reason
+ * text kept here no longer matches the hash written on-chain at the time of the sign-in.
+ */
+router.get('/emergency-reviews', asyncHandler(async (req, res) => {
+  const cases = await EmergencyCase.find().sort({ openedAt: -1 }).limit(100).populate('user', 'fullName email role').lean();
+  const status = emergencyReviewService.enabled ? await emergencyReviewService.status() : { enabled: false };
+  const data = await Promise.all(cases.map(async (c) => {
+    const onChain = status.enabled && c.chainStatus === 'recorded' ? await emergencyReviewService.onChain(c.caseId) : { recorded: false };
+    const reasonIntact = c.reasonHash === `0x${sha256(c.reason)}` && (!onChain.recorded || onChain.reasonHash === c.reasonHash);
+    return { ...c, onChain, reasonIntact };
+  }));
+  res.json({ success: true, data: { ...status, cases: data } });
+}));
+
+/**
+ * POST /api/admin/emergency-reviews/:caseId/review { verdict }: the transaction an administrator signs
+ * with their own wallet. The case closes on-chain when k administrators give the same verdict.
+ */
+router.post('/emergency-reviews/:caseId/review', validate({
+  params: Joi.object({ caseId: Joi.string().pattern(/^0x[0-9a-f]{64}$/).required() }),
+  body: Joi.object({ verdict: Joi.string().valid('justified', 'misuse').required() }),
+}), asyncHandler(async (req, res) => {
+  if (!emergencyReviewService.enabled) throw badRequest('On-chain emergency review is not configured (EMERGENCY_REVIEW_ADDRESS).');
+  const c = await EmergencyCase.findOne({ caseId: req.params.caseId }).populate('user', 'fullName role').lean();
+  if (!c) throw notFound('No such emergency case');
+  if (c.chainStatus !== 'recorded') throw conflict('This case is not on the blockchain yet (the chain was unreachable). Run npm run chain:anchor-pending.', 'CASE_PENDING');
+  res.json({ success: true, data: {
+    tx: emergencyReviewService.reviewTx(c.caseId, req.body.verdict),
+    verify: { caseId: c.caseId, verdict: req.body.verdict, fullName: c.user ? c.user.fullName : null },
+  } });
 }));
 
 /* ---------------------------------------------------------------- statistics */

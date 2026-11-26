@@ -235,6 +235,57 @@
     });
   }
 
+  /* ================================================================ emergency reviews (D12) */
+
+  /** Decodes review(bytes32,uint8) and checks it is the case and verdict the administrator clicked. */
+  function checkReview(tx, reg, verify, clickedCaseId, clickedVerdict) {
+    if (tx.to.toLowerCase() !== reg.address.toLowerCase()) throw new Error('The transaction is not addressed to the emergency review contract. Not signed.');
+    const w = words(tx.data, 'review(bytes32,uint8)');
+    const caseId = `0x${w[0]}`;
+    const verdict = { 1: 'justified', 2: 'misuse' }[parseInt(w[1], 16)];
+    if (caseId.toLowerCase() !== clickedCaseId.toLowerCase() || verify.caseId.toLowerCase() !== caseId.toLowerCase()) throw new Error('The transaction is for a different emergency case than the one you clicked. Not signed.');
+    if (verdict !== clickedVerdict) throw new Error(`The transaction would mark the case as ${verdict}, not ${clickedVerdict}. Not signed.`);
+    return `Mark the emergency sign-in of ${verify.fullName || 'this user'} as "${verdict === 'misuse' ? 'MISUSE' : 'justified'}"`;
+  }
+
+  async function emergency(c) {
+    const reg = (await c.api.get('/api/admin/emergency-reviews')).data;
+    if (c.stale()) return;
+    const state = (e) => {
+      if (e.chainStatus === 'disabled') return tag('inactive', 'Not on-chain (review contract not configured)');
+      if (e.chainStatus === 'pending') return tag('pending', 'Waiting to reach the blockchain');
+      if (!e.onChain.recorded) return tag('denied', 'Not found on-chain');
+      if (e.onChain.verdict) return tag(e.onChain.verdict === 'misuse' ? 'denied' : 'active', `Closed: ${e.onChain.verdict}`);
+      return tag('pending', `Open: ${e.onChain.justifiedVotes} justified, ${e.onChain.misuseVotes} misuse (${reg.threshold} needed)`);
+    };
+    const open = (e) => reg.enabled && e.chainStatus === 'recorded' && e.onChain.recorded && !e.onChain.verdict;
+    const rule = reg.enabled
+      ? `<dl class="kv"><dt>Contract</dt><dd class="mono">${esc(reg.address)}</dd>
+          <dt>Network</dt><dd>chain id ${esc(String(reg.chainId))} (your wallet must be on the same network)</dd>
+          <dt>Rule</dt><dd>A case closes when ${reg.threshold} of the ${reg.governorCount} administrators give the same verdict with their own wallets. No single administrator can close it.</dd></dl>`
+      : UI.emptyHtml('Not on-chain yet', 'Set EMERGENCY_REVIEW_ADDRESS (with CHAIN_RPC_URL and CHAIN_PRIVATE_KEY) to record every emergency sign-in on the blockchain. Cases are still listed here.', 'info');
+
+    c.container.innerHTML = `
+      ${UI.card('Emergency sign-in review', 'siren', rule)}
+      ${UI.card('Cases', 'list-checks', UI.table([
+        { label: 'When', render: (e) => `<span class="nowrap">${esc(fmtDateTime(e.openedAt))}</span><br><span class="text-muted text-small">ledger #${e.ledgerSeq ?? '—'}, trust ${e.trustScore ?? '—'}</span>` },
+        { label: 'Who', render: (e) => (e.user ? `<strong>${esc(e.user.fullName)}</strong><br><span class="text-muted text-small">${esc(titleCase(e.role))}</span>` : esc(titleCase(e.role))) },
+        { label: 'Stated reason', render: (e) => `${esc(e.reason)}${e.reasonIntact ? '' : `<br>${tag('denied', 'Reason text changed after the sign-in')}`}` },
+        { label: 'State', render: state },
+        { label: '', render: (e) => (open(e)
+          ? `<button class="btn btn-sm btn-primary" data-action="review" data-verdict="justified" data-id="${e.caseId}">Justified</button>
+             <button class="btn btn-sm btn-danger" data-action="review" data-verdict="misuse" data-id="${e.caseId}">Misuse</button>` : '') },
+      ], reg.cases, 'No emergency sign-ins so far'))}`;
+
+    c.on({
+      review: (el) => c.act(async () => {
+        const { data } = await c.api.post(`/api/admin/emergency-reviews/${el.dataset.id}/review`, { verdict: el.dataset.verdict });
+        const summary = checkReview(data.tx, reg, data.verify, el.dataset.id, el.dataset.verdict);
+        await signChecked(reg, data.tx, summary, 'Your verdict is recorded on-chain.');
+      }, { success: false }),
+    });
+  }
+
   /* ================================================================ users */
 
   const userFilters = { role: '', status: '', q: '' };
@@ -510,11 +561,12 @@
         { id: 'ledger', label: 'Ledger', icon: 'link', title: 'Blockchain Ledger' },
         { id: 'access', label: 'Access Control', icon: 'shield', title: 'Access Control Audit' },
         { id: 'roles', label: 'Role Registry', icon: 'key-round', title: 'On-chain Role Registry (k of n)' },
+        { id: 'emergency', label: 'Emergency Reviews', icon: 'siren', title: 'Emergency Sign-in Reviews (k of n)' },
         { id: 'notifications', label: 'Notifications', icon: 'bell', badge: 'notifications' },
         { id: 'profile', label: 'Profile & Security', icon: 'settings' },
       ] },
     ],
-    pages: { dashboard, verification, users, ledger, access, devices, reports, settings, roles },
+    pages: { dashboard, verification, users, ledger, access, devices, reports, settings, roles, emergency },
     badges: async ({ api, setBadge }) => {
       const res = await api.get('/api/admin/doctors/pending-verification');
       setBadge('badge-verification', res.data.length);

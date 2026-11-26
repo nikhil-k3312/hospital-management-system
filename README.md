@@ -164,6 +164,20 @@ every anchored head; authenticator set-up only on the first-login browser (or wi
 network change at refresh re-scored (`REFRESH_ON_NETWORK_CHANGE`); trusted device bound to browser
 family + OS; anchor rate cap (`ANCHOR_MIN_SECONDS`); one IP-hash function everywhere; pilot scripts.
 
+Guide's decisions (26 Nov 2026), now the defaults:
+
+| Decision | Setting |
+|---|---|
+| D10: thresholds derived from the approved rules (`experiments/thresholds/rules.csv`: R1-R5, R7, R10, R12) with the calibrated points and a floor of 50 | 70 / 50 for every role |
+| Problem 15: trust-score points calibrated on the RBA dataset (location stays 35/20/15/5 until the AHP survey) | device 18/0, time 14/0, network 33/33/0 |
+| D1: authenticator app required for every role | `TOTP_REQUIRED_ROLES=patient,doctor,admin,insurance_agent` |
+| D12: every emergency sign-in opens a case in `EmergencyReview.sol`; it closes only when k of n administrators give the same verdict with their own wallets (same administrators and k as the role registry) | `EMERGENCY_REVIEW_ADDRESS`, admin page "Emergency Reviews" |
+
+The paper's original model (35/25/20/20; 65/50, 70/55, 70/55, 80/60) stays as `REFERENCE_POINTS` in
+`config.js`; the test suite pins it for its worked examples, and the v3 baseline always uses it.
+`tests/unit/adoptedPolicy.test.js` checks every approved rule against the adopted defaults.
+Deploy the review contract after the role registry: `npm run deploy:review:local` (or `:besu`) in `blockchain`.
+
 New settings are documented in `.env.example`. Tests: `npm test` in `backend/services/api`
 (new: `tests/integration/carma.test.js`, `tests/unit/totpService.test.js`) and `npx hardhat test`
 in `blockchain`. Experiments: see `experiments/README.md`.

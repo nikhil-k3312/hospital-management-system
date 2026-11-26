@@ -503,3 +503,111 @@ describe('Problem 26: staff roles must be held in the on-chain k-of-n registry',
     expect(res.body.code).toBe('ROLE_REGISTRY_UNAVAILABLE');
   });
 });
+
+/* ------------------------------------------------------------------- D12: emergency reviews */
+describe('D12: every emergency sign-in becomes a case that k of n administrators close on-chain', () => {
+  const emergencyService = require('../../src/services/emergencyReviewService');
+  const EmergencyCase = require('../../src/models/EmergencyCase');
+  const { RoleService } = require('../../src/services/roleService');
+  const { sha256 } = require('../../src/utils/hash');
+  const { ethers } = require('ethers');
+  const REASON = 'Cardiac arrest in ICU bed 4, need history';
+
+  async function emergencySignIn() {
+    const doctor = await createUser('doctor', { loginCount: 3 });
+    const codes = captureCodes();
+    const ch = await post('/api/auth/login/dynamic', { ip: UK_IP }).send({ email: doctor.email, password: PASSWORD, context: { gps: GPS_HYDERABAD } });
+    expect(ch.body.data.emergencyOnly).toBe(true);
+    const em = await post('/api/auth/login/challenge', { ip: UK_IP }).send({ challengeId: ch.body.data.challengeId, otp: codes[0], emergencyReason: REASON });
+    expect(em.status).toBe(200);
+    return doctor;
+  }
+  /** A stand-in for the contract: the hospital key opens cases, k = 2 of 3. */
+  function fakeContract({ reachable = true } = {}) {
+    Object.defineProperty(emergencyService, 'enabled', { get: () => true, configurable: true });
+    const opened = new Map();
+    const openCase = jest.fn(async (caseId, subject, reasonHash) => {
+      if (!reachable) throw new Error('connect ECONNREFUSED 127.0.0.1:8545');
+      opened.set(caseId, { subject, reasonHash });
+      return { wait: async () => ({ hash: `0x${'b'.repeat(64)}` }) };
+    });
+    jest.spyOn(emergencyService, 'writeContract').mockImplementation(() => ({ openCase }));
+    jest.spyOn(emergencyService, 'status').mockResolvedValue({ enabled: true, address: `0x${'c'.repeat(40)}`, chainId: 1337, threshold: 2, governorCount: 3, governorEpoch: 0 });
+    jest.spyOn(emergencyService, 'onChain').mockImplementation(async (caseId) => (opened.has(caseId)
+      ? { recorded: true, verdict: null, justifiedVotes: 1, misuseVotes: 0, epoch: 0, closedAt: null, reasonHash: opened.get(caseId).reasonHash }
+      : { recorded: false }));
+    return { openCase, opened, setReachable: (v) => { reachable = v; } };
+  }
+  afterEach(() => { delete emergencyService.enabled; });
+  const settle = () => new Promise((r) => setTimeout(r, 50)); // the on-chain write runs in the background
+
+  test('the case is linked to the ledger entry of the sign-in and holds only hashes', async () => {
+    const doctor = await emergencySignIn();
+    const entry = await LedgerEntry.findOne({ chain: 'access', entityType: 'login_context', 'meta.reason': 'emergency_login' }).lean();
+    const c = await EmergencyCase.findOne({ user: doctor._id }).lean();
+    expect(c).toMatchObject({ caseId: `0x${entry.entryHash}`, ledgerSeq: entry.seq, reason: REASON, reasonHash: `0x${sha256(REASON)}`, chainStatus: 'disabled' });
+    const salt = (await User.findById(doctor._id).lean()).roleSalt;
+    expect(c.subject).toBe(RoleService.subjectOf(doctor._id.toString(), salt)); // salted, as in the RoleRegistry
+  });
+
+  test('with the contract: the hospital key opens the case on-chain; the admin page lists it', async () => {
+    const chain = fakeContract();
+    const doctor = await emergencySignIn();
+    await settle();
+    const c = await EmergencyCase.findOne({ user: doctor._id }).lean();
+    expect(c.chainStatus).toBe('recorded');
+    expect(chain.openCase).toHaveBeenCalledWith(c.caseId, c.subject, c.reasonHash);
+
+    const admin = await login(await createUser('admin'));
+    const list = await as(admin).get('/api/admin/emergency-reviews');
+    expect(list.status).toBe(200);
+    expect(list.body.data).toMatchObject({ enabled: true, threshold: 2 });
+    expect(list.body.data.cases[0]).toMatchObject({ caseId: c.caseId, reasonIntact: true, onChain: { recorded: true, verdict: null } });
+  });
+
+  test("the verdict transaction is built for the administrator's own wallet and encodes exactly that case and verdict", async () => {
+    fakeContract();
+    await emergencySignIn();
+    await settle();
+    const c = await EmergencyCase.findOne().lean();
+    const admin = await login(await createUser('admin'));
+    const res = await as(admin).post(`/api/admin/emergency-reviews/${c.caseId}/review`).send({ verdict: 'misuse' });
+    expect(res.status).toBe(200);
+    const decoded = new ethers.Interface(['function review(bytes32 caseId, uint8 verdict)']).decodeFunctionData('review', res.body.data.tx.data);
+    expect(decoded.caseId).toBe(c.caseId);
+    expect(Number(decoded.verdict)).toBe(2); // misuse
+    expect(res.body.data.verify).toMatchObject({ caseId: c.caseId, verdict: 'misuse' });
+    const bad = await as(admin).post(`/api/admin/emergency-reviews/${c.caseId}/review`).send({ verdict: 'close' });
+    expect(bad.status).toBe(400);
+  });
+
+  test('a changed reason text in the database is flagged (the chain holds the original hash)', async () => {
+    fakeContract();
+    await emergencySignIn();
+    await settle();
+    await EmergencyCase.collection.updateOne({}, { $set: { reason: 'Routine check', reasonHash: `0x${sha256('Routine check')}` } });
+    const admin = await login(await createUser('admin'));
+    const list = await as(admin).get('/api/admin/emergency-reviews');
+    expect(list.body.data.cases[0].reasonIntact).toBe(false);
+  });
+
+  test('chain down: the sign-in still works, the case waits, and the retry puts it on-chain', async () => {
+    const chain = fakeContract({ reachable: false });
+    const doctor = await emergencySignIn();
+    await settle();
+    expect((await EmergencyCase.findOne({ user: doctor._id }).lean()).chainStatus).toBe('pending');
+    const admin = await login(await createUser('admin'));
+    const early = await as(admin).post(`/api/admin/emergency-reviews/${(await EmergencyCase.findOne().lean()).caseId}/review`).send({ verdict: 'justified' });
+    expect(early.status).toBe(409);
+    expect(early.body.code).toBe('CASE_PENDING');
+    chain.setReachable(true);
+    expect(await emergencyService.retryPending()).toEqual({ retried: 1, recorded: 1 });
+    expect((await EmergencyCase.findOne({ user: doctor._id }).lean()).chainStatus).toBe('recorded');
+  });
+
+  test('only administrators see and review cases', async () => {
+    await emergencySignIn();
+    const doctor = await login(await createUser('doctor'));
+    expect((await as(doctor).get('/api/admin/emergency-reviews')).status).toBe(403);
+  });
+});

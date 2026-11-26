@@ -71,24 +71,40 @@ async function main() {
       const acct = pool[next % pool.length];
       next += 1;
       client.setHeaders(headers({ 'X-Forwarded-For': ip, ...(withCookie ? { Cookie: acct.cookie } : {}) }));
-      // GPS agrees with the IP actually used (for the new network: new browser -> 35+10+20+5 = 70,
-      // medium for every role; the known network's position would score "far" and make it high)
+      // GPS agrees with the IP actually used (a position far from the IP would make the sign-in high risk)
       client.setBody(loginBody(acct.email, h.gpsFor(ip, 'near')));
     };
   };
+  // Medium tier = a NEW browser on the user's KNOWN network: the possession gate caps it at medium under
+  // any points and thresholds (a new browser on a new network is high risk with the calibrated points).
   const endpoints = [
     { name: 'GET /api/users/me (audit on)', before: () => { cfg.audit.everyRequest = true; }, opts: () => ({ method: 'GET', path: '/api/users/me', headers: headers({ Authorization: `Bearer ${currentToken}` }) }) },
     { name: 'GET /api/users/me (audit off)', before: () => { cfg.audit.everyRequest = false; }, opts: () => ({ method: 'GET', path: '/api/users/me', headers: headers({ Authorization: `Bearer ${currentToken}` }) }) },
     { name: 'login, low tier (password only)', before: () => { cfg.audit.everyRequest = true; cfg.context.profile = 'carma'; },
+      expect: { mode: 'redirect' }, probe: { cookie: true, ip: h.NETWORKS.known },
       opts: () => ({ method: 'POST', path: '/api/auth/login/dynamic', setupClient: perClient(true, h.NETWORKS.known) }) },
     { name: 'login, medium tier (step 1: code e-mailed)', before: () => { cfg.context.profile = 'carma'; },
-      opts: () => ({ method: 'POST', path: '/api/auth/login/dynamic', setupClient: perClient(false, h.NETWORKS.new) }) },
+      expect: { mode: 'challenge', risk: 'medium' }, probe: { cookie: false, ip: h.NETWORKS.known },
+      opts: () => ({ method: 'POST', path: '/api/auth/login/dynamic', setupClient: perClient(false, h.NETWORKS.known) }) },
     { name: 'login, B1 static 2FA (step 1: code e-mailed)', before: () => { cfg.context.profile = 'static'; },
+      expect: { mode: 'challenge', risk: 'medium' }, probe: { cookie: true, ip: h.NETWORKS.known },
       opts: () => ({ method: 'POST', path: '/api/auth/login/dynamic', setupClient: perClient(true, h.NETWORKS.known) }) },
   ];
 
+  /** One sign-in exactly as the load test sends it: the measurement stops if the tier is not the intended one. */
+  async function probeTier(ep) {
+    const acct = pool[0];
+    const res = await h.http('POST', '/api/auth/login/dynamic', { ip: ep.probe.ip, ua: 'Perf/1.0', cookies: ep.probe.cookie ? [acct.cookie] : [],
+      body: { email: acct.email, password: h.PASSWORD, context: { gps: h.gpsFor(ep.probe.ip, 'near') } } });
+    const got = { status: res.status, mode: res.body?.data?.mode, risk: res.body?.data?.assessment?.risk };
+    const ok = res.status === 200 && got.mode === ep.expect.mode && (!ep.expect.risk || got.risk === ep.expect.risk);
+    if (!ok) throw new Error(`"${ep.name}" does not produce the intended tier: expected ${JSON.stringify(ep.expect)}, got ${JSON.stringify(got)} ${JSON.stringify(res.body).slice(0, 200)}`);
+    console.log(`checked: "${ep.name}" -> ${JSON.stringify(got)}`);
+  }
+
   const rows = [];
   for (const ep of endpoints) {
+    if (ep.expect) { ep.before(); await probeTier(ep); }
     for (const connections of LEVELS) {
       for (let rep = 0; rep < REPS; rep += 1) {
         // a new access token for each run, so none expires during a measurement

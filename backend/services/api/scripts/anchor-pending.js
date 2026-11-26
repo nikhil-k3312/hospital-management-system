@@ -57,6 +57,10 @@ async function main() {
     if (result.status === 'refused') refused += 1;
   }
 
+  // D12: emergency sign-in cases the chain could not take at the time
+  const emergency = await require('../src/services/emergencyReviewService').retryPending();
+  if (emergency.retried) console.log(`emergency cases: ${emergency.recorded} of ${emergency.retried} now on-chain`);
+
   console.log(`anchored ${anchored}, refused ${refused}`);
   await disconnectMongo();
   if (refused > 0) process.exitCode = 1;

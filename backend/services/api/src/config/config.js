@@ -17,15 +17,32 @@ const toList = (value, fallback) => (value === undefined ? fallback : value).spl
 const toBool = (value, fallback) => (value === undefined || value === '' ? fallback : ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase()));
 
 // CARMA role thresholds (upper, lower): low risk if T > upper, medium if T >= lower, high otherwise.
-// Starting values from the plan (Problem 6); the final values come from experiments/thresholds/derive.py (decision D10).
 // Trust-score points per signal level (Problem 15, review issue 5). CONTEXT_POINTS (JSON, same shape)
-// replaces them, e.g. with the values calibrated on the RBA dataset (experiments/rba/calibrate.py).
-const DEFAULT_POINTS = {
+// and RISK_<ROLE>_UPPER / _LOWER override them.
+//
+// Adopted 26 Nov 2026 (guide's answers, decisions D10 and Problem 15):
+//   points     = calibrated on the RBA dataset: experiments/rba/out/context_points.json
+//                (location kept at 35/20/15/5 until the AHP survey, Problem 15 part B)
+//   thresholds = experiments/thresholds/derive.py --points ../rba/out/context_points.json --min-lower 50
+//                on the approved rules.csv: 70/50 for every role
+// The paper's original model (35/25/20/20 and 65/50, 70/55, 70/55, 80/60) is the REFERENCE below; the
+// test suite pins it (tests/env.js) because its worked examples use those numbers.
+const REFERENCE_POINTS = {
   location: { near: 35, mid: 20, unknown: 15, far: 5 },
   device: { trusted: 25, new: 10 },
   time: { duty: 20, off: 10 },
   network: { hospital: 20, known: 15, new: 5 },
   penalty: { perFailure: 10, max: 30 },
+};
+const DEFAULT_POINTS = {
+  location: { near: 35, mid: 20, unknown: 15, far: 5 },
+  device: { trusted: 18, new: 0 },
+  time: { duty: 14, off: 0 },
+  network: { hospital: 33, known: 33, new: 0 },
+  penalty: { perFailure: 10, max: 30 },
+};
+const DEFAULT_THRESHOLDS = {
+  patient: [70, 50], insurance_agent: [70, 50], doctor: [70, 50], admin: [70, 50],
 };
 function parsePoints(raw) {
   if (!raw) return DEFAULT_POINTS;
@@ -99,7 +116,8 @@ const config = {
     // Problem 7 / D2: a session may be refreshed for at most this long after the sign-in itself.
     maxSessionHours: toInt(env.MAX_SESSION_HOURS, 12),
     // Problem 2 / D1: roles that must have an authenticator app (TOTP) before using the system.
-    totpRequiredRoles: toList(env.TOTP_REQUIRED_ROLES, 'doctor,admin,insurance_agent'),
+    // D1 (guide, 26 Nov 2026): the authenticator app is required for every role, patients included.
+    totpRequiredRoles: toList(env.TOTP_REQUIRED_ROLES, 'patient,doctor,admin,insurance_agent'),
     // AES-256-GCM key (64 hex characters) that encrypts TOTP secrets at rest.
     totpEncryptionKey: env.TOTP_ENC_KEY || '',
     // TOTP setup is allowed only this many minutes after a (non-emergency) sign-in.
@@ -144,6 +162,8 @@ const config = {
     patientRefSecret: env.PATIENT_REF_SECRET || '',
     // Problem 26: on-chain k-of-n register of staff roles (empty = not used, MongoDB decides).
     roleRegistryAddress: env.ROLE_REGISTRY_ADDRESS || '',
+    // D12 (guide, 26 Nov 2026): emergency sign-in reviews on-chain (blockchain/scripts/deployEmergencyReview.js)
+    emergencyReviewAddress: env.EMERGENCY_REVIEW_ADDRESS || '',
     roleCacheSeconds: toInt(env.ROLE_CACHE_SECONDS, 60),
     // if the chain cannot be reached, a cached answer may be used for this long before failing closed
     roleStaleSeconds: toInt(env.ROLE_STALE_SECONDS, 15 * 60),
@@ -166,10 +186,10 @@ const config = {
     //            static = password + emailed code at every login (baseline B1, experiments only)
     profile: env.CONTEXT_PROFILE || 'carma',
     riskThresholds: {
-      patient: threshold('patient', 65, 50),
-      insurance_agent: threshold('insurance_agent', 70, 55),
-      doctor: threshold('doctor', 70, 55),
-      admin: threshold('admin', 80, 60),
+      patient: threshold('patient', ...DEFAULT_THRESHOLDS.patient),
+      insurance_agent: threshold('insurance_agent', ...DEFAULT_THRESHOLDS.insurance_agent),
+      doctor: threshold('doctor', ...DEFAULT_THRESHOLDS.doctor),
+      admin: threshold('admin', ...DEFAULT_THRESHOLDS.admin),
     },
     // Problem 5: the low tier needs fewer than this many failed attempts since the last sign-in.
     failureGate: toInt(env.FAILURE_GATE, 2),
@@ -237,6 +257,9 @@ function validateConfig(cfg = config, rawEnv = env) {
   if (cfg.isProduction && !rawEnv.TOTP_ENC_KEY) {
     throw new Error('TOTP_ENC_KEY is required in production');
   }
+  if (rawEnv.EMERGENCY_REVIEW_ADDRESS && !(rawEnv.CHAIN_RPC_URL && rawEnv.CHAIN_PRIVATE_KEY)) {
+    throw new Error('EMERGENCY_REVIEW_ADDRESS needs CHAIN_RPC_URL and CHAIN_PRIVATE_KEY (the hospital opens the cases)');
+  }
   if (rawEnv.ROLE_REGISTRY_ADDRESS && !rawEnv.CHAIN_RPC_URL) {
     throw new Error('ROLE_REGISTRY_ADDRESS needs CHAIN_RPC_URL');
   }
@@ -260,3 +283,6 @@ function validateConfig(cfg = config, rawEnv = env) {
 
 module.exports = config;
 module.exports.validateConfig = validateConfig;
+module.exports.DEFAULT_POINTS = DEFAULT_POINTS;
+module.exports.DEFAULT_THRESHOLDS = DEFAULT_THRESHOLDS;
+module.exports.REFERENCE_POINTS = REFERENCE_POINTS;

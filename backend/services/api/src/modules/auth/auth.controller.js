@@ -9,6 +9,7 @@ const routingService = require('../../services/routingService');
 const contextService = require('../../services/contextService');
 const totpService = require('../../services/totpService');
 const roleService = require('../../services/roleService');
+const emergencyReviewService = require('../../services/emergencyReviewService');
 const redisClient = require('../../db/redis');
 const crypto = require('crypto');
 const { sha256, ipHash } = require('../../utils/hash');
@@ -349,12 +350,18 @@ async function completeDynamicLogin(req, res, user, assessment, deviceKnown, eme
   if (!deviceKnown && !emergency) await deviceService.trust(req, res, user, amr.includes('totp') ? 'totp' : 'otp');
   const landing = await routingService.resolveLanding(user);
   if (emergency) {
-    await auditContext(req, user, assessment, 'allow', 'emergency_login', emergency.reason);
+    const entry = await auditContext(req, user, assessment, 'allow', 'emergency_login', emergency.reason);
+    // D12: every emergency sign-in becomes a case that only k of n administrators can close on-chain
+    try {
+      await emergencyReviewService.open({ user, entry, reason: emergency.reason, trustScore: assessment.score });
+    } catch (error) {
+      logger.error(`Emergency case not opened for ${user.email}: ${error.message}`);
+    }
     await notificationService.notifyRole('admin', {
       type: 'warning',
       title: 'Emergency sign-in used',
-      message: `${user.fullName} (${user.role}) signed in with emergency access at trust score ${assessment.score}. Reason: "${emergency.reason}". Review it in Access Control.`,
-      page: 'access',
+      message: `${user.fullName} (${user.role}) signed in with emergency access at trust score ${assessment.score}. Reason: "${emergency.reason}". Review it on the Emergency Reviews page.`,
+      page: 'emergency',
     });
     logger.warn(`Emergency login: ${user.email} score ${assessment.score}`);
   } else {

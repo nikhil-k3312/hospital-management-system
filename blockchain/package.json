@@ -9,7 +9,9 @@
     "deploy:local": "hardhat run scripts/deploy.js --network localhost",
     "deploy:roles:local": "hardhat run scripts/deployRoleRegistry.js --network localhost",
     "deploy:besu": "hardhat run scripts/deploy.js --network besu",
-    "deploy:roles:besu": "hardhat run scripts/deployRoleRegistry.js --network besu"
+    "deploy:roles:besu": "hardhat run scripts/deployRoleRegistry.js --network besu",
+    "deploy:review:local": "hardhat run scripts/deployEmergencyReview.js --network localhost",
+    "deploy:review:besu": "hardhat run scripts/deployEmergencyReview.js --network besu"
   },
   "license": "ISC",
   "devDependencies": {

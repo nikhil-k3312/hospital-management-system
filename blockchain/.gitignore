@@ -2,3 +2,5 @@ node_modules/
 artifacts/
 cache/
 deployment.json
+role-registry.json
+emergency-review.json
